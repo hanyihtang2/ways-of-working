@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "version": "1.0.0",
+  "config": {
+    "deterministicCommand": "npm test"
+  },
+  "areas": {
+    "core": {
+      "title": "Core Application Logic",
+      "description": "Main business logic, domain services, and models.",
+      "paths": [
+        "src/"
+      ],
+      "techStack": ["typescript"]
+    },
+    "automation/ci": {
+      "title": "CI/CD & GitHub Actions",
+      "description": "Continuous integration, quality gates, and automated deployment pipelines.",
+      "paths": [
+        ".github/workflows/"
+      ],
+      "techStack": ["github-actions", "yaml"]
+    },
+    "review/agentic": {
+      "title": "Agentic Review & Quality Gates",
+      "description": "Two-tier reviewer contracts, pre-review verification scripts, PR evidence templates, and standards.",
+      "paths": [
+        "pm/standards/",
+        "AGENTS.md"
+      ],
+      "techStack": ["markdown"]
+    }
+  }
+}

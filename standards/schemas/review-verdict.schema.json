@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ways-of-working.local/schemas/review-verdict.schema.json",
+  "title": "AgentReviewVerdict",
+  "description": "Standardized schema for Tier 1 and Tier 2 agentic review verdicts across repositories.",
+  "type": "object",
+  "required": [
+    "task_id",
+    "verdict",
+    "iteration",
+    "evaluated_at",
+    "blocking_count",
+    "summary",
+    "findings"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[A-Z]+-\\d+$",
+      "description": "The unique task identifier (e.g. TASK-019)."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "CHANGES_REQUESTED", "ESCALATED_TO_HUMAN"],
+      "description": "Final review evaluation verdict."
+    },
+    "iteration": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2,
+      "description": "Active review iteration number (1 or 2)."
+    },
+    "evaluated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp when the review was conducted."
+    },
+    "reviewer": {
+      "type": "string",
+      "description": "Identifier or role of the reviewing subagent."
+    },
+    "deterministic_checks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "enum": ["SUCCESS", "FAILED", "SKIPPED"]
+      },
+      "description": "Status results of deterministic compilation and test checks."
+    },
+    "blocking_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total count of blocking defects (sum of P0 + P1 findings)."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 10,
+      "description": "Executive review summary articulating reasons for the verdict."
+    },
+    "findings": {
+      "type": "array",
+      "description": "List of discrete findings categorized by severity.",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "severity",
+          "file",
+          "description",
+          "evidence",
+          "suggested_fix"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Finding identifier (e.g. F-001)."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["P0", "P1", "P2"],
+            "description": "P0 (Blocker), P1 (High), or P2 (Nit/Suggestion)."
+          },
+          "file": {
+            "type": "string",
+            "description": "Relative file path containing the finding."
+          },
+          "line_start": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Starting line number in the diff/file."
+          },
+          "line_end": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Ending line number in the diff/file."
+          },
+          "criterion_id": {
+            "type": "string",
+            "description": "Associated acceptance criterion ID or rule tag."
+          },
+          "description": {
+            "type": "string",
+            "description": "Clear explanation of the problem."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Proof of defect: reproduction trace, input trigger, or violated constraint."
+          },
+          "suggested_fix": {
+            "type": "string",
+            "description": "Actionable code diff or remediation instruction."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,133 @@
+name: Agent Quality Gate (Tier 2 Reusable Gate)
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version to use"
+        required: false
+        default: "22"
+        type: string
+      build-command:
+        description: "Deterministic build/test command"
+        required: false
+        default: "npm run build"
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: quality-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic-gate:
+    name: Deterministic Build & Verification Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run deterministic verification
+        id: build_step
+        run: ${{ inputs.build-command }}
+        env:
+          CI: "true"
+
+      - name: Record Deterministic Success to Step Summary
+        if: success()
+        run: |
+          echo "### ✅ Deterministic Gate: PASSED" >> $GITHUB_STEP_SUMMARY
+          echo "- **Command:** \`${{ inputs.build-command }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Node Version:** Node ${{ inputs.node-version }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Record Deterministic Failure to Step Summary
+        if: failure()
+        run: |
+          echo "### ❌ Deterministic Gate: FAILED" >> $GITHUB_STEP_SUMMARY
+          echo "The deterministic check (\`${{ inputs.build-command }}\`) failed. LLM review and human merge are blocked." >> $GITHUB_STEP_SUMMARY
+
+  evidence-gate:
+    name: Evidence Pack & Review Contract Gate
+    needs: [deterministic-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify PR Description Evidence Pack
+        id: verify_pr_body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr ? (pr.body || '') : '';
+
+            const requiredSections = [
+              { name: 'Summary of Intent', regex: /##\s+Summary of Intent/i },
+              { name: 'Task & PRD Reference', regex: /##\s+Task & PRD Reference/i },
+              { name: 'Acceptance Criteria Checklist', regex: /##\s+Acceptance Criteria Checklist/i },
+              { name: 'Tier 1 Subagent Review Evidence', regex: /##\s+Tier 1 Subagent Review Evidence/i },
+              { name: 'Scope & Boundary Audit', regex: /##\s+Scope & Boundary Audit/i },
+            ];
+
+            const missingSections = [];
+            for (const section of requiredSections) {
+              if (!section.regex.test(body)) {
+                missingSections.push(section.name);
+              }
+            }
+
+            // Look for JSON block in PR body
+            let jsonVerdict = null;
+            const jsonMatch = body.match(/```json\s*([\s\S]*?)\s*```/);
+            if (jsonMatch) {
+              try {
+                jsonVerdict = JSON.parse(jsonMatch[1]);
+              } catch (e) {
+                // not valid JSON
+              }
+            }
+
+            const isPassVerdict = jsonVerdict && jsonVerdict.verdict === 'PASS' && (jsonVerdict.blocking_count === 0 || jsonVerdict.blocking_count === undefined);
+
+            core.setOutput('missing_count', missingSections.length.toString());
+            core.setOutput('missing_sections', missingSections.join(', '));
+            core.setOutput('has_pass_verdict', isPassVerdict ? 'true' : 'false');
+            core.setOutput('verdict_json', jsonVerdict ? JSON.stringify(jsonVerdict) : 'none');
+
+            let summaryMd = '## 📋 Tier 2 Agent Quality Gate Audit\n\n';
+            summaryMd += '| Check | Status | Details |\n';
+            summaryMd += '| :--- | :---: | :--- |\n';
+            summaryMd += `| **Deterministic Check** | ✅ PASS | \`${{ inputs.build-command }}\` passed cleanly |\n`;
+            
+            if (missingSections.length === 0) {
+              summaryMd += `| **Evidence Pack Structure** | ✅ PASS | All ${requiredSections.length} required PR sections present |\n`;
+            } else {
+              summaryMd += `| **Evidence Pack Structure** | ❌ FAIL | Missing: ${missingSections.join(', ')} |\n`;
+            }
+
+            if (isPassVerdict) {
+              summaryMd += `| **Tier 1 Review Verdict** | ✅ PASS | \`PASS\` verdict (0 blocking P0/P1 defects) |\n`;
+            } else {
+              summaryMd += `| **Tier 1 Review Verdict** | ⚠️ PENDING/FAIL | Missing valid \`PASS\` JSON verdict in PR description |\n`;
+            }
+
+            summaryMd += '\n> [!NOTE]\n> A human maintainer holds the merge key. Verify the findings before clicking Merge.\n';
+
+            await core.summary.addRaw(summaryMd).write();
+
+            if (missingSections.length > 0) {
+              core.setFailed(`PR description is missing required Evidence Pack sections: ${missingSections.join(', ')}`);
+            }

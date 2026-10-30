@@ -1,0 +1,17 @@
+{
+  "name": "@org/ways-of-working-cli",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Universal PM-as-Code and Two-Tier Agentic Review CLI",
+  "bin": {
+    "wow": "./dist/index.js",
+    "pm": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
