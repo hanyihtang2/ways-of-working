@@ -13,6 +13,11 @@ on:
         required: false
         default: "npm run build"
         type: string
+      package-manager:
+        description: "Package manager to use: auto | npm | pnpm | yarn"
+        required: false
+        default: "auto"
+        type: string
 
 permissions:
   contents: read
@@ -30,14 +35,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Detect package manager
+        id: detect-pm
+        run: |
+          PM="${{ inputs.package-manager }}"
+          if [ "$PM" = "auto" ]; then
+            if [ -f "pnpm-lock.yaml" ]; then
+              PM="pnpm"
+            elif [ -f "yarn.lock" ]; then
+              PM="yarn"
+            else
+              PM="npm"
+            fi
+          fi
+          echo "manager=$PM" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm
+        if: steps.detect-pm.outputs.manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+
       - name: Setup Node.js ${{ inputs.node-version }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: npm
+          cache: ${{ steps.detect-pm.outputs.manager }}
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          if [ "${{ steps.detect-pm.outputs.manager }}" = "pnpm" ]; then
+            pnpm install --frozen-lockfile
+          elif [ "${{ steps.detect-pm.outputs.manager }}" = "yarn" ]; then
+            yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
 
       - name: Run deterministic verification
         id: build_step
@@ -131,3 +162,4 @@ jobs:
             if (missingSections.length > 0) {
               core.setFailed(`PR description is missing required Evidence Pack sections: ${missingSections.join(', ')}`);
             }
+
