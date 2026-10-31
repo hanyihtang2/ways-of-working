@@ -54,6 +54,9 @@ A P1 finding represents an architectural, boundary, or stability violation that 
 - **Missing Error Handling on I/O:** Unhandled network timeouts, missing fallback for missing files, or swallowed errors that hide systemic failures.
 - **API Contract Breakage:** Modifying existing exported functions, interfaces, or CLI flags in a backwards-incompatible manner without deprecation or migration handling.
 - **Unchecked Edge Cases:** Failing to handle empty arrays, empty strings, zero values, or maximum length payloads when processing dynamic external inputs.
+- **Environment Variable Parity:** Any code referencing `process.env.<VAR_NAME>` where `<VAR_NAME>` is not documented with a safe default or placeholder in `.env.example`.
+- **Zero-Config Local Dev Violation:** Introducing third-party cloud services or external credentials without an autonomous local dev fallback (e.g., local mock, dev bypass, or clear in-UI configuration guidance banner when credentials are unset).
+- **Hardcoded Localhost in Client Code:** Using absolute `http://localhost:<port>` URLs in client-side code instead of relative endpoints or dynamic origin (`window.location.origin`), causing cross-origin network errors on non-default ports or IP bindings.
 
 #### P2: Nit / Suggestion (Informational Only)
 A P2 finding is an observation or advisory note. P2 findings **never block a merge**, do not count towards the blocker tally, and do not trigger a review loop iteration.
@@ -131,3 +134,4 @@ flowchart TD
     Escalate --> Human["Human Engineer Intervenes"]
     Tier2 --> HumanMerge["Human Reviewer Merges PR"]
 ```
+

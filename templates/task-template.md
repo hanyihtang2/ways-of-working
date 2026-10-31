@@ -42,3 +42,4 @@ updated_at: {{DATE}}
 
 ### Execution Log / Decisions
 *(Leave blank for agent to fill during task execution)*
+

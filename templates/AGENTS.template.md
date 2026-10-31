@@ -13,6 +13,7 @@ All AI coding agents must adhere to the operating procedures below.
 3. **No Self-Review:** Primary coding agents do not review their own work. Always compile an Evidence Pack (`npm run agent:review-pack`) and request an isolated fresh-context subagent review.
 4. **No Ad-Hoc PR Descriptions:** Never hand-write or guess PR descriptions. Always generate them using `npm run agent:prepare-pr <TASK-ID>` to satisfy the Tier 2 GitHub Actions Quality Gate.
 5. **Human Merge Authority:** AI agents do not possess auto-merge authority. Human maintainers hold the merge key.
+6. **Zero-Config Local Dev & Environment Parity:** Any new environment variable (`process.env.*`) introduced in code must be documented in `.env.example`. Any external third-party service integration (OAuth, APIs, payment, storage) must work out-of-the-box in local development (`npm run dev`) with an offline/dev fallback or a clear, actionable in-UI configuration guidance banner. Client code must never hardcode localhost URLs.
 
 ---
 
@@ -65,3 +66,4 @@ Shared standards are sourced from [`ways-of-working`](https://github.com/hanyiht
 - **Review Severity & Proof-of-Defect:** `standards/AGENT_REVIEW_CONTRACT.md`
 - **Reviewer Subagent Specification:** `standards/TIER_1_REVIEWER_SPEC.md`
 - **Verdict Schema:** `standards/schemas/review-verdict.schema.json`
+

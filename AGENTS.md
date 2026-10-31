@@ -9,6 +9,7 @@ Welcome to **Ways of Working (WoW)**. This repository hosts the universal standa
 1. **Standard Stability:** Changes to `standards/` and `schemas/` must remain backwards-compatible with downstream adopting repositories (`portfolio`, `PlateMark`, `MAKER`, `CommuteShift`).
 2. **Deterministic Checks:** Always ensure TypeScript compiles cleanly (`npm run build`) before preparing changes.
 3. **No Unstructured Reviews:** All automated reviews across projects must adhere to `standards/AGENT_REVIEW_CONTRACT.md`.
+4. **Zero-Config Local Dev & Environment Parity:** New configuration keys must be documented in `.env.example`, and standards must mandate out-of-the-box local development resilience across all adopting repositories.
 
 ---
 
@@ -24,3 +25,4 @@ ways-of-working/
 ├── public/                # Machine-readable LLM indexes (llms.txt)
 └── .github/workflows/     # Reusable Tier 2 GitHub Quality Gate
 ```
+

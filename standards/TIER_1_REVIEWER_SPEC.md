@@ -68,9 +68,9 @@ To ensure the review is objective and cannot accidentally tamper with working st
 
 ---
 
-## 3. Four Core Evaluation Axes
+## 3. Five Core Evaluation Axes
 
-The reviewer subagent audits the branch diff against four mandatory axes:
+The reviewer subagent audits the branch diff against five mandatory axes:
 
 ```mermaid
 flowchart TD
@@ -78,10 +78,12 @@ flowchart TD
     Pack --> B["2. Error Handling & Edge Cases"]
     Pack --> C["3. Security Posture"]
     Pack --> D["4. Scope Containment (pm/areas.json)"]
+    Pack --> E["5. Operational & Environmental Readiness"]
     A --> Verdict["Structured Review Verdict"]
     B --> Verdict
     C --> Verdict
     D --> Verdict
+    E --> Verdict
 ```
 
 ### Axis 1: Acceptance Criteria Fulfillment
@@ -105,6 +107,11 @@ flowchart TD
   1. The declared `target_paths` in task frontmatter.
   2. The registered domain paths in `pm/areas.json`.
 - If changes modify files in an unrelated domain without justification, record a **P1 High defect**.
+
+### Axis 5: Operational & Environmental Readiness (Zero-Config Local Dev)
+- **Environment Variable Parity:** Check that every `process.env.<VAR>` referenced in the diff is documented with a safe default or placeholder in `.env.example`. If any are missing, record a **P1 High defect**.
+- **Zero-Config Local Dev:** Can a developer run `npm run dev` from a clean checkout and immediately test the feature? If an external cloud service (e.g. Google OAuth, Stripe) is involved, is there an autonomous local mock/dev bypass or a clear, actionable in-UI guidance banner? If the UI throws raw network/provider exceptions, record a **P1 High defect**.
+- **No Hardcoded Localhost:** Are client-side endpoints relative or dynamic (`window.location.origin`) rather than hardcoded to `http://localhost:3000`? If client code hardcodes localhost, record a **P1 High defect**.
 
 ---
 
@@ -181,3 +188,4 @@ To automate the transition from Tier 1 local approval to Tier 2 GitHub pull requ
    ```bash
    npm run agent:prepare-pr <task-id>
    ```
+

@@ -52,6 +52,13 @@ export interface MatchedAreaInfo {
   matchedFiles: string[];
 }
 
+export interface EnvironmentAuditResult {
+  envExampleVars: string[];
+  referencedEnvVars: string[];
+  missingEnvVars: string[];
+  hardcodedLocalhostUrls: string[];
+}
+
 export interface EvidencePackData {
   taskId: string;
   targetBranch: string;
@@ -63,6 +70,7 @@ export interface EvidencePackData {
   deterministicChecks: DeterministicCheckResult[];
   changedFiles: string[];
   gitDiff: string;
+  environmentAudit?: EnvironmentAuditResult;
 }
 
 export interface ReviewFinding {
@@ -125,3 +133,4 @@ export interface TaskItem {
   taskRelPath: string;
   prdRelPath: string;
 }
+

@@ -71,3 +71,4 @@
 
 > [!IMPORTANT]
 > Merging to `main` requires manual review and sign-off by a human repository maintainer. Automated agents do not possess direct merge authority.
+
