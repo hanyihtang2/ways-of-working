@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ways-of-working.local/schemas/areas.schema.json",
+  "title": "RepositoryAreasConfig",
+  "description": "Schema for pm/areas.json mapping repository domains, paths, tech stack, and architectural risk metadata.",
+  "type": "object",
+  "required": ["areas"],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string",
+      "default": "1.1.0"
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "deterministicCommand": {
+          "type": "string",
+          "description": "Deterministic build and test command executed before review."
+        },
+        "baseBranch": {
+          "type": "string",
+          "default": "main",
+          "description": "Default target base branch for git diff extraction."
+        }
+      },
+      "additionalProperties": true
+    },
+    "areas": {
+      "type": "object",
+      "description": "Map of architectural domain keys to area definitions.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["title", "description", "paths", "techStack"],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Human-readable name of the architectural area."
+          },
+          "description": {
+            "type": "string",
+            "description": "Summary of responsibilities and invariants owned by this area."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Path prefixes or exact relative file paths belonging to this area."
+          },
+          "techStack": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Languages, runtimes, or tools used in this area."
+          },
+          "risk_tier": {
+            "type": "string",
+            "enum": ["standard", "high"],
+            "default": "standard",
+            "description": "Risk classification. Changes matching a 'high' risk_tier area automatically escalate to review_depth: 'architectural'."
+          },
+          "structural_boundaries": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "examples": [
+              [
+                "env-boot",
+                "db-client",
+                "auth-session",
+                "edge-proxy",
+                "build-ci",
+                "cli-entrypoint",
+                "client-server-boundary"
+              ]
+            ],
+            "description": "Structural runtime or trust boundaries governed by this area. Touching or crossing these boundaries triggers architectural review auto-escalation."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

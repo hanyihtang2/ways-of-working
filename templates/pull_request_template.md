@@ -29,6 +29,7 @@
 ### Review Verdict
 
 - **Verdict:** `PASS`
+- **Review Depth:** `standard` <!-- or `architectural` when escalation triggers apply -->
 - **Iteration Count:** `1` of `2`
 - **Reviewer:** `agent:reviewer-subagent`
 - **Blocking Count (P0 + P1):** `0`
@@ -37,9 +38,18 @@
 {
   "task_id": "{{TASK_ID}}",
   "verdict": "PASS",
+  "review_depth": "standard",
   "iteration": 1,
+  "evaluated_at": "{{TIMESTAMP}}",
+  "reviewer": "agent:reviewer-subagent",
   "deterministic_checks": {
     "build": "SUCCESS"
+  },
+  "architectural_checks": {
+    "import_boot_isolation": "PASS",
+    "fail_closed_defaults": "PASS",
+    "write_atomicity": "N/A",
+    "no_test_theater": "PASS"
   },
   "blocking_count": 0,
   "summary": "Verified all criteria against unified diff. Zero blockers found.",
@@ -60,10 +70,12 @@
 
 ## Scope & Boundary Audit
 
+- [ ] Pre-Coding Spec Challenge completed: task instructions verified against repository ADRs and runtime boundaries (`client` / `server` / `edge` / `cli`).
 - [ ] All modified files reside within domains mapped in [`pm/areas.json`](pm/areas.json).
 - [ ] No files outside the task's declared `target_paths` were modified without documented rationale.
+- [ ] When `review_depth: "architectural"` applies, all four `architectural_checks` (`import_boot_isolation`, `fail_closed_defaults`, `write_atomicity`, `no_test_theater`) are attested.
 - [ ] No secrets, tokens, or private credentials committed.
-- [ ] Deterministic tests pass locally with zero regressions.
+- [ ] Deterministic behavioral tests pass locally with zero regressions and zero static source-regex test theater.
 
 ---
 
@@ -71,4 +83,3 @@
 
 > [!IMPORTANT]
 > Merging to `main` requires manual review and sign-off by a human repository maintainer. Automated agents do not possess direct merge authority.
-

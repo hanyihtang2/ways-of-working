@@ -24,13 +24,15 @@ Every adopting repository maintains a `pm/` root folder:
 
 ```text
 pm/
-├── areas.json                        # Map of repository domains, paths, and tech stack
+├── areas.json                        # Map of repository domains, paths, tech stack, risk_tier, and structural_boundaries
 ├── KANBAN.md                         # Auto-generated task board across all features
 ├── ROADMAP.md                        # Auto-generated feature release table
 ├── standards/                        # Governing review contracts and reviewer specifications
 │   ├── AGENT_REVIEW_CONTRACT.md
 │   ├── TIER_1_REVIEWER_SPEC.md
-│   └── schemas/review-verdict.schema.json
+│   └── schemas/
+│       ├── review-verdict.schema.json
+│       └── areas.schema.json
 ├── templates/                        # Scaffolding templates
 │   ├── prd-template.md
 │   └── task-template.md
@@ -62,12 +64,12 @@ Initiatives are classified under `pm/features/` with standardized prefixes:
 
 ```mermaid
 flowchart LR
-    Backlog["0-backlog"] -->|Claim Task| InProgress["1-in-progress"]
-    InProgress -->|Code + Tier 1 PASS| Review["2-review"]
+    Backlog["0-backlog"] -->|Claim Task + Pre-Coding Spec Challenge| InProgress["1-in-progress"]
+    InProgress -->|Code + Tier 1 / Architectural PASS| Review["2-review"]
     Review -->|PR Merge| Done["3-done"]
 ```
 
 1. **`0-backlog/`:** Planned tasks waiting for resource availability.
-2. **`1-in-progress/`:** Assigned to an agent or developer. Work is underway on a dedicated branch.
-3. **`2-review/`:** Code is written, deterministic checks pass, Tier 1 subagent verdict is `PASS`, and a PR is open.
+2. **`1-in-progress/`:** Assigned to an agent or developer. Before writing code, the agent runs the **Pre-Coding Spec Challenge** to validate task instructions against repository ADRs and runtime boundaries (`client` / `server` / `edge` / `cli`).
+3. **`2-review/`:** Code is written, deterministic checks pass, Tier 1 subagent verdict is `PASS` (including `architectural_checks` when auto-escalation triggers apply), and a PR is open.
 4. **`3-done/`:** The PR is approved and merged into `main` by a human maintainer.

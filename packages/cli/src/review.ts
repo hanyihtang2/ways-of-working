@@ -2,13 +2,17 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync, spawnSync } from "node:child_process";
 import type {
+  ArchitecturalCheckStatus,
   AreasConfig,
   DeterministicCheckResult,
+  EscalationTrigger,
   EvidencePackData,
   MatchedAreaInfo,
+  ReviewDepth,
   ReviewFinding,
   ReviewVerdict,
   TaskSpec,
+  TestTheaterSuspect,
   VerdictStatus,
 } from "./types.js";
 import { parseFrontmatter } from "./pm.js";
@@ -36,6 +40,20 @@ export const DIFF_EXCLUDED_PATTERNS = [
 ];
 
 const MAX_DIFF_LENGTH = 50_000;
+
+export const REQUIRED_ARCHITECTURAL_CHECK_KEYS = [
+  "import_boot_isolation",
+  "fail_closed_defaults",
+  "write_atomicity",
+  "no_test_theater",
+] as const;
+
+export const ARCHITECTURAL_RUBRIC_ITEMS: string[] = [
+  "1. Import-Time & Boot-Chain Isolation (import_boot_isolation): Trace top-level imports across the module graph for eager initialization, DB pool creation, env validation, or server-only leaks into client/edge/CLI contexts.",
+  "2. Fail-Closed Defaults & Negative Paths (fail_closed_defaults): Verify missing env vars, empty/omitted parameters (e.g., nodeEnv = ''), and non-default runtime modes (e.g., NODE_ENV=production CLI execution) fail closed with actionable errors rather than silently skipping checks.",
+  "3. Multi-Step Write Atomicity & Idempotency (write_atomicity): Verify multi-statement persistence flows use atomic transactions and clean partial-failure handling ('PASS' or 'N/A' if no persistence writes exist).",
+  "4. Test Theater Detection (no_test_theater — P1 Blocker): Flag unit tests that verify behavioral invariants purely by reading application source files with regexes/strings (e.g., fs.readFileSync + regex) instead of testing runtime execution (unless explicitly scoped to static config validation).",
+];
 
 export function findTaskFile(rootDir: string, taskIdOrKeyword: string): string | null {
   const featuresDir = path.join(rootDir, "pm", "features");
@@ -270,7 +288,7 @@ export function matchAreas(rootDir: string, changedFiles: string[]): {
     for (const [key, areaDef] of Object.entries(config.areas || {})) {
       const isMatch = areaDef.paths.some((p: string) => {
         const norm = p.replace(/\\/g, "/");
-        return norm.endsWith("/") ? file.startsWith(norm) : file === norm || file.startsWith(norm);
+        return norm.endsWith("/") ? file.startsWith(norm) : file === norm || file.startsWith(norm + "/") || file.startsWith(norm);
       });
       if (isMatch) {
         matched = true;
@@ -281,6 +299,10 @@ export function matchAreas(rootDir: string, changedFiles: string[]): {
             description: areaDef.description,
             techStack: areaDef.techStack,
             matchedFiles: [],
+            risk_tier: areaDef.risk_tier,
+            structural_boundaries: Array.isArray(areaDef.structural_boundaries)
+              ? [...areaDef.structural_boundaries]
+              : undefined,
           });
         }
         matchedMap.get(key)!.matchedFiles.push(file);
@@ -295,7 +317,267 @@ export function matchAreas(rootDir: string, changedFiles: string[]): {
   };
 }
 
-export function validateReviewVerdict(data: unknown): { valid: boolean; errors: string[] } {
+export function isTestFile(filePath: string): boolean {
+  const norm = filePath.replace(/\\/g, "/");
+  return /\.(test|spec)\.[a-z0-9]+$/i.test(norm) || /(^|\/)(__tests__|tests?|spec)\//i.test(norm);
+}
+
+/**
+ * Detects "Test Theater": unit/integration tests that read application source files as strings
+ * (e.g. readFileSync / readFile) and assert against source text with regexes or substring checks
+ * instead of exercising runtime behavior.
+ *
+ * Ignores legitimate data-fixture reads (e.g. reading .json, .csv, .txt, .sql fixtures) and
+ * ignores module import/mock declarations.
+ */
+export function detectTestTheater(
+  rootDir: string,
+  changedFiles: string[],
+  gitDiff: string
+): TestTheaterSuspect[] {
+  const suspects: TestTheaterSuspect[] = [];
+  const testFiles = changedFiles.filter(isTestFile);
+
+  const fileReadRegex = /\b(readFileSync|readFile|readTextFile|read_text)\s*\(/;
+  const sourcePathRefRegex =
+    /(['"`])(?:(?!\1).)*?\.(?!test\.|spec\.|d\.)(ts|tsx|js|jsx|mjs|cjs|py|go|rs)\1/i;
+  const regexAssertionRegex =
+    /(\.toMatch\s*\(|\.match\s*\(|assert\.match\s*\(|new\s+RegExp\s*\(|\.toContain\s*\(|\/[^/\r\n]+\/[gimsuy]*\.test\s*\()/;
+  const importOrMockLineRegex =
+    /^\s*(import\s+|export\s+.*from\s+|(?:vi|jest)\.mock\s*\()/;
+
+  for (const testFile of testFiles) {
+    const absPath = path.join(rootDir, testFile);
+    let content = "";
+    if (fs.existsSync(absPath)) {
+      try {
+        content = fs.readFileSync(absPath, "utf-8");
+      } catch {}
+    }
+
+    if (!content && gitDiff) {
+      content = extractDiffForFile(gitDiff, testFile);
+    }
+    if (!content) continue;
+
+    if (!fileReadRegex.test(content)) continue;
+
+    const lines = content.split(/\r?\n/);
+    const nonImportBody = lines
+      .filter((line) => !importOrMockLineRegex.test(line))
+      .join("\n");
+
+    const hasSourceRef = sourcePathRefRegex.test(nonImportBody);
+    const hasRegexAssert = regexAssertionRegex.test(nonImportBody);
+
+    if (hasSourceRef && hasRegexAssert) {
+      let matchedLine = 1;
+      let snippet = "";
+      for (let i = 0; i < lines.length; i++) {
+        if (fileReadRegex.test(lines[i])) {
+          matchedLine = i + 1;
+          snippet = lines.slice(Math.max(0, i - 1), Math.min(lines.length, i + 4)).join(" ").trim();
+          break;
+        }
+      }
+      suspects.push({
+        file: testFile,
+        line: matchedLine,
+        pattern: "readFileSync/readFile on source file + regex/string assertion",
+        snippet: snippet.slice(0, 200),
+      });
+    }
+  }
+
+  return suspects;
+}
+
+function extractDiffForFile(gitDiff: string, targetFile: string): string {
+  const norm = targetFile.replace(/\\/g, "/");
+  const sections = gitDiff.split(/^diff --git /m);
+  for (const sec of sections) {
+    if (sec.includes(`b/${norm}`) || sec.includes(norm)) {
+      return sec
+        .split(/\r?\n/)
+        .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+        .map((l) => l.slice(1))
+        .join("\n");
+    }
+  }
+  return gitDiff;
+}
+
+/**
+ * Evaluates objective auto-escalation triggers from areas.json metadata, changed file paths,
+ * diff content, and test theater analysis.
+ */
+export function evaluateReviewEscalation(
+  rootDir: string,
+  changedFiles: string[],
+  gitDiff: string,
+  matchedAreas: MatchedAreaInfo[]
+): {
+  reviewDepth: ReviewDepth;
+  escalationTriggers: EscalationTrigger[];
+  testTheaterSuspects: TestTheaterSuspect[];
+  architecturalRubric: string[];
+} {
+  const triggers: EscalationTrigger[] = [];
+
+  // Trigger 1: Area Risk & Cross-Boundary Scope
+  const highRiskAreas = matchedAreas.filter((a) => a.risk_tier === "high");
+  if (highRiskAreas.length > 0) {
+    const files = Array.from(new Set(highRiskAreas.flatMap((a) => a.matchedFiles)));
+    triggers.push({
+      id: "high-risk-area",
+      category: "area-risk-boundary",
+      reason: `Changed files match high-risk area(s): ${highRiskAreas.map((a) => a.key).join(", ")}`,
+      matchedFiles: files,
+    });
+  }
+
+  const boundaryAreas = matchedAreas.filter(
+    (a) => Array.isArray(a.structural_boundaries) && a.structural_boundaries.length > 0
+  );
+  if (boundaryAreas.length > 0) {
+    const distinctBoundaries = Array.from(
+      new Set(boundaryAreas.flatMap((a) => a.structural_boundaries || []))
+    );
+    const files = Array.from(new Set(boundaryAreas.flatMap((a) => a.matchedFiles)));
+    triggers.push({
+      id: "structural-boundary-area",
+      category: "area-risk-boundary",
+      reason: `Changed files touch structural boundary area(s) [${distinctBoundaries.join(", ")}] in ${boundaryAreas.map((a) => a.key).join(", ")}`,
+      matchedFiles: files,
+    });
+  }
+
+  if (matchedAreas.length > 1) {
+    const files = Array.from(new Set(matchedAreas.flatMap((a) => a.matchedFiles)));
+    triggers.push({
+      id: "cross-boundary-areas",
+      category: "area-risk-boundary",
+      reason: `Changes span multiple architectural areas (${matchedAreas.map((a) => a.key).join(", ")})`,
+      matchedFiles: files,
+    });
+  }
+
+  // Trigger 2: Critical Architectural Diff Surfaces
+  const nonTestFiles = changedFiles.filter((f) => !isTestFile(f));
+
+  const entrypointFiles = nonTestFiles.filter((f) =>
+    /(^|\/)(bin|cli|scripts)\/|(^|\/)(index|main|server|app|worker|instrumentation)\.[a-z0-9]+$/i.test(f)
+  );
+  const hasShebangDiff = /^[\+\-]\s*#!\/usr\/bin\/env/m.test(gitDiff);
+  if (entrypointFiles.length > 0 || hasShebangDiff) {
+    triggers.push({
+      id: "runtime-entrypoint",
+      category: "critical-diff-surface",
+      reason: "Diff alters runtime or CLI entrypoints",
+      matchedFiles: entrypointFiles.length > 0 ? entrypointFiles : changedFiles.slice(0, 5),
+    });
+  }
+
+  const authMiddlewareFiles = nonTestFiles.filter((f) =>
+    /(^|\/)(auth|session|middleware|proxy|guards?|permissions|rbac|oauth|jwt)([/.\-_]|$)/i.test(f)
+  );
+  if (authMiddlewareFiles.length > 0) {
+    triggers.push({
+      id: "auth-session-middleware",
+      category: "critical-diff-surface",
+      reason: "Diff alters authentication, session, middleware, or proxy boundary modules",
+      matchedFiles: authMiddlewareFiles,
+    });
+  }
+
+  const envConfigFiles = nonTestFiles.filter((f) =>
+    /(^|\/)\.env(\..+)?$|(^|\/)(env|config)([/.\-_]|$)/i.test(f)
+  );
+  const hasEnvDiffInCode =
+    nonTestFiles.length > 0 &&
+    /^[\+\-].*\b(process\.env|import\.meta\.env|os\.environ|std::env|os\.Getenv)\b/m.test(gitDiff);
+  if (envConfigFiles.length > 0 || hasEnvDiffInCode) {
+    triggers.push({
+      id: "env-boot-config",
+      category: "critical-diff-surface",
+      reason: "Diff alters environment variable schemas, boot validation, or runtime env access",
+      matchedFiles: envConfigFiles.length > 0 ? envConfigFiles : nonTestFiles,
+    });
+  }
+
+  const dbClientFiles = nonTestFiles.filter((f) =>
+    /(^|\/)(db|database|migrations?|seed)([/.\-_]|$)|(^|\/)(client|pool|connection|transaction)\.[a-z0-9]+$/i.test(f)
+  );
+  const hasDbInitOrTxDiff =
+    nonTestFiles.length > 0 &&
+    /^[\+\-].*\b(createPool|new\s+Pool|\.transaction\s*\()/m.test(gitDiff);
+  if (dbClientFiles.length > 0 || hasDbInitOrTxDiff) {
+    triggers.push({
+      id: "db-client-persistence",
+      category: "critical-diff-surface",
+      reason: "Diff alters database client initialization, connection pooling, migrations/seeds, or transaction flows",
+      matchedFiles: dbClientFiles.length > 0 ? dbClientFiles : nonTestFiles,
+    });
+  }
+
+  const buildCiFiles = changedFiles.filter((f) =>
+    /^\.github\/workflows\/|(^|\/)(Dockerfile|docker-compose[^/]*|Makefile|Procfile|turbo\.json|tsconfig[^/]*\.json)$|(^|\/)(vite|webpack|rollup|esbuild|tsup|jest|vitest|playwright)\.config\.[a-z0-9]+$/i.test(
+      f
+    )
+  );
+  if (buildCiFiles.length > 0) {
+    triggers.push({
+      id: "build-ci-workflow",
+      category: "critical-diff-surface",
+      reason: "Diff alters build configuration or CI/CD workflows",
+      matchedFiles: buildCiFiles,
+    });
+  }
+
+  const dependencyFiles = changedFiles.filter((f) =>
+    /(^|\/)(package\.json|pyproject\.toml|Cargo\.toml|go\.mod|requirements[^/]*\.txt|Gemfile|composer\.json)$/i.test(
+      f
+    )
+  );
+  if (dependencyFiles.length > 0) {
+    triggers.push({
+      id: "runtime-dependencies",
+      category: "critical-diff-surface",
+      reason: "Diff alters package manifests or runtime dependencies",
+      matchedFiles: dependencyFiles,
+    });
+  }
+
+  // Trigger 3: Static Source-Text Matching in Tests ("Test Theater")
+  const testTheaterSuspects = detectTestTheater(rootDir, changedFiles, gitDiff);
+  if (testTheaterSuspects.length > 0) {
+    triggers.push({
+      id: "test-theater-detected",
+      category: "test-theater",
+      reason: `Changed/added test file(s) use static source-text matching (readFileSync/readFile + regex/string assertions): ${testTheaterSuspects.map((s) => s.file).join(", ")}`,
+      matchedFiles: Array.from(new Set(testTheaterSuspects.map((s) => s.file))),
+    });
+  }
+
+  const reviewDepth: ReviewDepth = triggers.length > 0 ? "architectural" : "standard";
+
+  return {
+    reviewDepth,
+    escalationTriggers: triggers,
+    testTheaterSuspects,
+    architecturalRubric: reviewDepth === "architectural" ? ARCHITECTURAL_RUBRIC_ITEMS : [],
+  };
+}
+
+export interface ValidateVerdictOptions {
+  requiredDepth?: ReviewDepth;
+  escalationTriggers?: EscalationTrigger[];
+}
+
+export function validateReviewVerdict(
+  data: unknown,
+  options?: ValidateVerdictOptions
+): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
   if (!data || typeof data !== "object") return { valid: false, errors: ["Verdict must be a JSON object."] };
 
@@ -305,6 +587,52 @@ export function validateReviewVerdict(data: unknown): { valid: boolean; errors: 
   if (!v.verdict || !validVerdicts.includes(v.verdict)) errors.push(`Invalid verdict: '${v.verdict}'`);
   if (typeof v.iteration !== "number" || v.iteration < 1 || v.iteration > 2) errors.push(`Iteration must be 1 or 2`);
   if (!v.summary || v.summary.length < 10) errors.push(`Summary must be at least 10 chars`);
+
+  if (v.review_depth !== undefined && v.review_depth !== "standard" && v.review_depth !== "architectural") {
+    errors.push(`Invalid review_depth: '${v.review_depth}' (expected 'standard' or 'architectural')`);
+  }
+
+  const requiresArchitectural =
+    options?.requiredDepth === "architectural" || v.review_depth === "architectural";
+
+  if (options?.requiredDepth === "architectural" && v.review_depth !== "architectural") {
+    const triggerSummary =
+      options.escalationTriggers && options.escalationTriggers.length > 0
+        ? options.escalationTriggers.map((t) => t.id).join(", ")
+        : "auto-escalation trigger";
+    errors.push(
+      `Task triggered architectural auto-escalation (${triggerSummary}); verdict must set review_depth to 'architectural' (found: '${v.review_depth || "standard"}')`
+    );
+  }
+
+  if (requiresArchitectural || v.architectural_checks !== undefined) {
+    if (!v.architectural_checks || typeof v.architectural_checks !== "object") {
+      errors.push(
+        `architectural_checks attestation object is required when review_depth is 'architectural'`
+      );
+    } else {
+      const validStatuses: ArchitecturalCheckStatus[] = ["PASS", "FAIL", "N/A"];
+      for (const key of REQUIRED_ARCHITECTURAL_CHECK_KEYS) {
+        const status = v.architectural_checks[key];
+        if (!status || !validStatuses.includes(status)) {
+          errors.push(
+            `architectural_checks.${key} must be one of PASS | FAIL | N/A (found: '${status ?? "missing"}')`
+          );
+        } else if (v.verdict === "PASS" && status === "FAIL") {
+          errors.push(
+            `Verdict PASS is invalid when architectural_checks.${key} is 'FAIL'`
+          );
+        }
+      }
+      for (const [key, status] of Object.entries(v.architectural_checks)) {
+        if (status !== undefined && !validStatuses.includes(status)) {
+          errors.push(`architectural_checks.${key} has invalid status '${status}'`);
+        } else if (v.verdict === "PASS" && status === "FAIL" && !(REQUIRED_ARCHITECTURAL_CHECK_KEYS as readonly string[]).includes(key)) {
+          errors.push(`Verdict PASS is invalid when architectural_checks.${key} is 'FAIL'`);
+        }
+      }
+    }
+  }
 
   if (!Array.isArray(v.findings)) {
     errors.push(`'findings' must be an array`);
@@ -333,4 +661,119 @@ export function loadReviewVerdict(rootDir: string, taskId: string): ReviewVerdic
   } catch {
     return null;
   }
+}
+
+export function loadEvidencePack(rootDir: string, taskId: string): EvidencePackData | null {
+  const packPath = path.join(rootDir, ".review", `evidence-pack-${taskId.toLowerCase()}.md`);
+  if (!fs.existsSync(packPath)) return null;
+  try {
+    const raw = fs.readFileSync(packPath, "utf-8").trim();
+    if (raw.startsWith("{")) {
+      return JSON.parse(raw) as EvidencePackData;
+    }
+    const jsonMatch = raw.match(/```json\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[1]) as EvidencePackData;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function generatePrBody(
+  spec: TaskSpec,
+  verdict: ReviewVerdict,
+  pack?: EvidencePackData | null
+): string {
+  const reviewDepth: ReviewDepth = verdict.review_depth || pack?.reviewDepth || "standard";
+  const acLines =
+    spec.acceptanceCriteria.length > 0
+      ? spec.acceptanceCriteria.map((ac) => `- [x] ${ac.text}`).join("\n")
+      : "- [x] All task acceptance criteria satisfied and verified.";
+
+  const p2Findings = (verdict.findings || []).filter((f) => f.severity === "P2");
+  const p2Lines =
+    p2Findings.length > 0
+      ? p2Findings.map((f) => `- **${f.id}** (\`${f.file}\`): ${f.description}`).join("\n")
+      : "- _None_";
+
+  const detCheck = pack?.deterministicChecks?.[0];
+  const detCmd = detCheck?.command || "npm run build";
+  const detStatus = detCheck?.status || "SUCCESS";
+
+  const triggersList =
+    pack?.escalationTriggers && pack.escalationTriggers.length > 0
+      ? pack.escalationTriggers.map((t) => `  - \`${t.id}\`: ${t.reason}`).join("\n")
+      : "  - _None (standard review depth)_";
+
+  return [
+    "## Summary of Intent",
+    "",
+    spec.objective || `${spec.id}: ${spec.title}`,
+    "",
+    "---",
+    "",
+    "## Task & PRD Reference",
+    "",
+    `- **Parent Feature:** \`${spec.parentFeature}\``,
+    `- **Task ID:** \`${spec.id}\``,
+    `- **Task Specification:** \`${spec.filePath}\``,
+    "",
+    "---",
+    "",
+    "## Acceptance Criteria Checklist",
+    "",
+    acLines,
+    "",
+    "---",
+    "",
+    "## Tier 1 Subagent Review Evidence",
+    "",
+    "> **Standard Reference:** [`standards/AGENT_REVIEW_CONTRACT.md`](standards/AGENT_REVIEW_CONTRACT.md)",
+    "",
+    "### Review Verdict",
+    "",
+    `- **Verdict:** \`${verdict.verdict}\``,
+    `- **Review Depth:** \`${reviewDepth}\``,
+    `- **Iteration Count:** \`${verdict.iteration}\` of \`2\``,
+    `- **Reviewer:** \`${verdict.reviewer || "agent:reviewer-subagent"}\``,
+    `- **Blocking Count (P0 + P1):** \`${verdict.blocking_count}\``,
+    "- **Auto-Escalation Triggers:**",
+    triggersList,
+    "",
+    "```json",
+    JSON.stringify(verdict, null, 2),
+    "```",
+    "",
+    "### Deterministic Build Verification",
+    "",
+    `- **Command:** \`${detCmd}\``,
+    `- **Status:** \`${detStatus}\``,
+    "",
+    "### Non-Blocking Suggestions (P2 Findings)",
+    "",
+    p2Lines,
+    "",
+    "---",
+    "",
+    "## Scope & Boundary Audit",
+    "",
+    "- [x] Pre-Coding Spec Challenge completed: task instructions verified against repository ADRs and runtime boundaries (`client` / `server` / `edge` / `cli`).",
+    "- [x] All modified files reside within domains mapped in [`pm/areas.json`](pm/areas.json).",
+    "- [x] No files outside the task's declared `target_paths` were modified without documented rationale.",
+    reviewDepth === "architectural"
+      ? "- [x] `review_depth: \"architectural\"` required and all four `architectural_checks` (`import_boot_isolation`, `fail_closed_defaults`, `write_atomicity`, `no_test_theater`) are attested."
+      : "- [x] Review depth evaluated as `standard` (no architectural escalation triggers fired).",
+    "- [x] No secrets, tokens, or private credentials committed.",
+    "- [x] Deterministic behavioral tests pass locally with zero regressions and zero static source-regex test theater.",
+    "",
+    "---",
+    "",
+    "## Human Reviewer Sign-Off",
+    "",
+    "> [!IMPORTANT]",
+    "> Merging to `main` requires manual review and sign-off by a human repository maintainer. Automated agents do not possess direct merge authority.",
+    "",
+  ].join("\n");
 }

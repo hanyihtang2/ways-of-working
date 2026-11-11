@@ -14,10 +14,13 @@ import {
   moveTaskCommand,
 } from "./pm.js";
 import {
+  evaluateReviewEscalation,
   extractTaskSpec,
   findActiveTask,
   findTaskFile,
+  generatePrBody,
   getGitContext,
+  loadEvidencePack,
   loadReviewVerdict,
   matchAreas,
   runDeterministicCheck,
@@ -83,6 +86,12 @@ async function run() {
 
       const git = getGitContext(ROOT_DIR, baseBranch);
       const areas = matchAreas(ROOT_DIR, git.changedFiles);
+      const escalation = evaluateReviewEscalation(
+        ROOT_DIR,
+        git.changedFiles,
+        git.gitDiff,
+        areas.matchedAreas
+      );
 
       const reviewDir = path.join(ROOT_DIR, ".review");
       if (!fs.existsSync(reviewDir)) fs.mkdirSync(reviewDir, { recursive: true });
@@ -92,6 +101,11 @@ async function run() {
         targetBranch: baseBranch,
         currentBranch: git.currentBranch,
         timestamp: new Date().toISOString(),
+        reviewDepth: escalation.reviewDepth,
+        escalationTriggers: escalation.escalationTriggers,
+        testTheaterSuspects: escalation.testTheaterSuspects,
+        architecturalRubric:
+          escalation.architecturalRubric.length > 0 ? escalation.architecturalRubric : undefined,
         taskSpec: spec,
         matchedAreas: areas.matchedAreas,
         outOfScopeFiles: areas.outOfScopeFiles,
@@ -103,6 +117,22 @@ async function run() {
       const outPath = path.join(reviewDir, `evidence-pack-${spec.id.toLowerCase()}.md`);
       fs.writeFileSync(outPath, JSON.stringify(packData, null, 2), "utf-8");
       console.log(`\x1b[32m✔ Generated Evidence Pack:\x1b[0m ${outPath}`);
+      console.log(
+        `\x1b[36mℹ Review Depth:\x1b[0m ${escalation.reviewDepth.toUpperCase()} (${escalation.escalationTriggers.length} escalation trigger(s))`
+      );
+      if (escalation.escalationTriggers.length > 0) {
+        for (const t of escalation.escalationTriggers) {
+          console.log(`  \x1b[33m⚡ [${t.id}]\x1b[0m ${t.reason}`);
+        }
+      }
+      if (escalation.testTheaterSuspects.length > 0) {
+        console.warn(
+          `\x1b[31m⚠ Test Theater Suspect(s) Detected (P1 Blocker risk):\x1b[0m`
+        );
+        for (const s of escalation.testTheaterSuspects) {
+          console.warn(`  - ${s.file}:${s.line ?? 1} (${s.pattern})`);
+        }
+      }
       break;
     }
 
@@ -117,13 +147,20 @@ async function run() {
         console.error(`No verdict found for ${taskId} in .review/verdict-${taskId.toLowerCase()}.json`);
         process.exit(1);
       }
-      const validation = validateReviewVerdict(v);
+      const pack = loadEvidencePack(ROOT_DIR, taskId);
+      const validation = validateReviewVerdict(v, {
+        requiredDepth: pack?.reviewDepth,
+        escalationTriggers: pack?.escalationTriggers,
+      });
       if (!validation.valid) {
         console.error("Verdict validation failed:");
         validation.errors.forEach((e) => console.error(`  - ${e}`));
         process.exit(1);
       }
-      console.log(`\x1b[32m✔ Verdict Valid:\x1b[0m ${v.verdict} (${v.blocking_count} blockers)`);
+      const depthLabel = v.review_depth || pack?.reviewDepth || "standard";
+      console.log(
+        `\x1b[32m✔ Verdict Valid:\x1b[0m ${v.verdict} [depth=${depthLabel}] (${v.blocking_count} blockers)`
+      );
       break;
     }
 
@@ -143,8 +180,25 @@ async function run() {
         process.exit(1);
       }
 
+      const pack = loadEvidencePack(ROOT_DIR, spec.id);
+      const validation = validateReviewVerdict(v, {
+        requiredDepth: pack?.reviewDepth,
+        escalationTriggers: pack?.escalationTriggers,
+      });
+      if (!validation.valid) {
+        console.error("Cannot prepare PR — verdict failed contract validation:");
+        validation.errors.forEach((e) => console.error(`  - ${e}`));
+        process.exit(1);
+      }
+
+      const reviewDir = path.join(ROOT_DIR, ".review");
+      if (!fs.existsSync(reviewDir)) fs.mkdirSync(reviewDir, { recursive: true });
+      const prBodyPath = path.join(reviewDir, `pr-body-${spec.id.toLowerCase()}.md`);
+      fs.writeFileSync(prBodyPath, generatePrBody(spec, v, pack), "utf-8");
+
       moveTaskCommand(ROOT_DIR, spec.id, "review");
       console.log(`\x1b[32m✔ Task moved to review & boards synchronized.\x1b[0m`);
+      console.log(`\x1b[32m✔ Generated PR Body:\x1b[0m ${prBodyPath}`);
       break;
     }
 
@@ -158,9 +212,9 @@ Commands:
   wow roadmap                  Regenerate pm/ROADMAP.md table
   wow all                      Regenerate both Kanban and Roadmap
   wow move <ID> <stage>        Move task (backlog | in-progress | review | done)
-  wow review-pack [ID]         Run checks, extract diff, compile Evidence Pack
-  wow verdict <ID>             Validate review verdict JSON against schema
-  wow prepare-pr [ID]          Validate verdict, advance stage, prepare PR
+  wow review-pack [ID]         Run checks, extract diff, evaluate escalation, compile Evidence Pack
+  wow verdict <ID>             Validate review verdict JSON against schema & required review depth
+  wow prepare-pr [ID]          Validate verdict & architectural sign-off, advance stage, prepare PR
 `);
       break;
     }

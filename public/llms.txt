@@ -4,20 +4,21 @@
 
 ## Documentation Index
 
-- [PM-as-Code Philosophy & Architecture](docs/pm-as-code.md): Core concepts, directory structure, initiative classification, and 4-stage task lifecycle.
-- [Two-Tier Agentic Review Model](docs/two-tier-agent-review.md): Anti-blindness architecture, inner-loop Tier 1 vs outer-loop Tier 2, and P0/P1/P2 taxonomy.
+- [PM-as-Code Philosophy & Architecture](docs/pm-as-code.md): Core concepts, directory structure, initiative classification, Pre-Coding Spec Challenge, and 4-stage task lifecycle.
+- [Two-Tier Agentic Review Model](docs/two-tier-agent-review.md): Anti-blindness architecture, inner-loop Tier 1 vs outer-loop Tier 2, objective auto-escalation (`standard` vs. `architectural`), and P0/P1/P2 taxonomy.
 - [Sibling Repository Adoption Guide](docs/adoption-guide.md): How to adopt these standards in any repository in 3 steps.
 
 ## Standards & Contracts
 
-- [Agent Review Contract](standards/AGENT_REVIEW_CONTRACT.md): Severity taxonomy, proof-of-defect requirements, iteration bounds (max 2).
-- [Tier 1 Reviewer Specification](standards/TIER_1_REVIEWER_SPEC.md): Fresh-context subagent rules, read-only permissions, 4 audit axes.
-- [Review Verdict Schema](standards/schemas/review-verdict.schema.json): Universal JSON schema for machine-readable review verdicts.
+- [Agent Review Contract](standards/AGENT_REVIEW_CONTRACT.md): Severity taxonomy, Pre-Coding Spec Challenge, objective auto-escalation triggers, adversarial architectural checklist, proof-of-defect requirements, iteration bounds (max 2).
+- [Tier 1 Reviewer Specification](standards/TIER_1_REVIEWER_SPEC.md): Fresh-context subagent rules, read-only permissions, 5 core evaluation axes + 4 adversarial architectural trace checks.
+- [Review Verdict Schema](standards/schemas/review-verdict.schema.json): Universal JSON schema for machine-readable review verdicts (`review_depth` and `architectural_checks`).
+- [Areas Schema](standards/schemas/areas.schema.json): Universal JSON schema for `pm/areas.json` domain boundaries, `risk_tier`, and `structural_boundaries`.
 
 ## Starter Templates
 
-- [AGENTS.md Template](templates/AGENTS.template.md): Starter operating manual for AI coding agents.
+- [AGENTS.md Template](templates/AGENTS.template.md): Starter operating manual for AI coding agents with Pre-Coding Spec Challenge and auto-escalation rules.
 - [PRD Template](templates/prd-template.md): Standard Markdown template for feature specifications.
 - [Task Template](templates/task-template.md): Standard Markdown template for agent task execution.
-- [Areas Template](templates/areas.template.json): Template for architectural boundary mapping.
-- [PR Template](templates/pull_request_template.md): Pull request template enforcing Evidence Pack inclusion.
+- [Areas Template](templates/areas.template.json): Template for architectural boundary and risk-tier mapping.
+- [PR Template](templates/pull_request_template.md): Pull request template enforcing Evidence Pack and architectural attestation inclusion.

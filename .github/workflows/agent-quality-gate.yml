@@ -18,6 +18,11 @@ on:
         required: false
         default: "auto"
         type: string
+      enforce-architectural-gate:
+        description: "Architectural attestation enforcement mode: auto | strict | warn"
+        required: false
+        default: "auto"
+        type: string
 
 permissions:
   contents: read
@@ -96,14 +101,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Verify PR Description Evidence Pack
+      - name: Verify PR Description Evidence Pack & Architectural Attestation
         id: verify_pr_body
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('fs');
+            const path = require('path');
+
             const pr = context.payload.pull_request;
             const body = pr ? (pr.body || '') : '';
+            const gateMode = '${{ inputs.enforce-architectural-gate }}' || 'auto';
 
             const requiredSections = [
               { name: 'Summary of Intent', regex: /##\s+Summary of Intent/i },
@@ -131,18 +142,214 @@ jobs:
               }
             }
 
-            const isPassVerdict = jsonVerdict && jsonVerdict.verdict === 'PASS' && (jsonVerdict.blocking_count === 0 || jsonVerdict.blocking_count === undefined);
+            const isPassVerdict = Boolean(
+              jsonVerdict &&
+              jsonVerdict.verdict === 'PASS' &&
+              (jsonVerdict.blocking_count === 0 || jsonVerdict.blocking_count === undefined)
+            );
+
+            // Collect PR changed files and patches
+            let prFiles = [];
+            if (pr && pr.number) {
+              try {
+                prFiles = await github.paginate(github.rest.pulls.listFiles, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  per_page: 100,
+                });
+              } catch (e) {
+                prFiles = [];
+              }
+            }
+
+            const changedFiles = prFiles.map((f) => f.filename.replace(/\\/g, '/'));
+            const combinedPatch = prFiles.map((f) => f.patch || '').join('\n');
+
+            // Load pm/areas.json if present
+            let areasConfig = { areas: {} };
+            let hasRiskMetadataInAreas = false;
+            if (fs.existsSync('pm/areas.json')) {
+              try {
+                areasConfig = JSON.parse(fs.readFileSync('pm/areas.json', 'utf8'));
+                for (const areaDef of Object.values(areasConfig.areas || {})) {
+                  if (
+                    areaDef.risk_tier !== undefined ||
+                    (Array.isArray(areaDef.structural_boundaries) && areaDef.structural_boundaries.length > 0)
+                  ) {
+                    hasRiskMetadataInAreas = true;
+                  }
+                }
+              } catch (e) {}
+            }
+
+            // Check if local verdict schema supports review_depth / architectural_checks
+            let hasV11VerdictSchema = false;
+            for (const schemaPath of [
+              'standards/schemas/review-verdict.schema.json',
+              'pm/standards/schemas/review-verdict.schema.json',
+            ]) {
+              if (fs.existsSync(schemaPath)) {
+                try {
+                  const schemaRaw = fs.readFileSync(schemaPath, 'utf8');
+                  if (schemaRaw.includes('architectural_checks') || schemaRaw.includes('review_depth')) {
+                    hasV11VerdictSchema = true;
+                  }
+                } catch (e) {}
+              }
+            }
+
+            // Evaluate Objective Auto-Escalation Triggers
+            const escalationTriggers = [];
+            const matchedAreaKeys = new Set();
+            const matchedHighRiskAreas = new Set();
+            const matchedBoundaries = new Set();
+
+            for (const file of changedFiles) {
+              for (const [key, areaDef] of Object.entries(areasConfig.areas || {})) {
+                const paths = Array.isArray(areaDef.paths) ? areaDef.paths : [];
+                const isMatch = paths.some((p) => {
+                  const norm = String(p).replace(/\\/g, '/');
+                  return norm.endsWith('/') ? file.startsWith(norm) : file === norm || file.startsWith(norm + '/') || file.startsWith(norm);
+                });
+                if (isMatch) {
+                  matchedAreaKeys.add(key);
+                  if (areaDef.risk_tier === 'high') {
+                    matchedHighRiskAreas.add(key);
+                  }
+                  if (Array.isArray(areaDef.structural_boundaries)) {
+                    for (const b of areaDef.structural_boundaries) {
+                      matchedBoundaries.add(b);
+                    }
+                  }
+                }
+              }
+            }
+
+            if (matchedHighRiskAreas.size > 0) {
+              escalationTriggers.push(`high-risk-area (${Array.from(matchedHighRiskAreas).join(', ')})`);
+            }
+            if (matchedBoundaries.size > 0) {
+              escalationTriggers.push(`structural-boundary (${Array.from(matchedBoundaries).join(', ')})`);
+            }
+            if (matchedAreaKeys.size > 1 && hasRiskMetadataInAreas) {
+              escalationTriggers.push(`cross-boundary-areas (${Array.from(matchedAreaKeys).join(', ')})`);
+            }
+
+            const isTestFile = (f) => /\.(test|spec)\.[a-z0-9]+$/i.test(f) || /(^|\/)(__tests__|tests?|spec)\//i.test(f);
+            const nonTestFiles = changedFiles.filter((f) => !isTestFile(f));
+
+            if (nonTestFiles.some((f) => /(^|\/)(bin|cli|scripts)\/|(^|\/)(index|main|server|app|worker|instrumentation)\.[a-z0-9]+$/i.test(f))) {
+              escalationTriggers.push('critical-surface:runtime-entrypoint');
+            }
+            if (nonTestFiles.some((f) => /(^|\/)(auth|session|middleware|proxy|guards?|permissions|rbac|oauth|jwt)([/.\-_]|$)/i.test(f))) {
+              escalationTriggers.push('critical-surface:auth-session-middleware');
+            }
+            if (nonTestFiles.some((f) => /(^|\/)\.env(\..+)?$|(^|\/)(env|config)([/.\-_]|$)/i.test(f))) {
+              escalationTriggers.push('critical-surface:env-boot-config');
+            }
+            if (nonTestFiles.some((f) => /(^|\/)(db|database|migrations?|seed)([/.\-_]|$)|(^|\/)(client|pool|connection|transaction)\.[a-z0-9]+$/i.test(f))) {
+              escalationTriggers.push('critical-surface:db-client-persistence');
+            }
+            if (changedFiles.some((f) => /^\.github\/workflows\/|(^|\/)(Dockerfile|docker-compose[^/]*|Makefile|Procfile|turbo\.json|tsconfig[^/]*\.json)$|(^|\/)(vite|webpack|rollup|esbuild|tsup|jest|vitest|playwright)\.config\.[a-z0-9]+$/i.test(f))) {
+              escalationTriggers.push('critical-surface:build-ci-workflow');
+            }
+            if (changedFiles.some((f) => /(^|\/)(package\.json|pyproject\.toml|Cargo\.toml|go\.mod|requirements[^/]*\.txt|Gemfile|composer\.json)$/i.test(f))) {
+              escalationTriggers.push('critical-surface:runtime-dependencies');
+            }
+
+            // Detect static source-text matching in changed test files ("Test Theater")
+            // Ignores import/mock statements and ignores data fixture reads (.json, .csv, etc.)
+            const testFiles = changedFiles.filter(isTestFile);
+            const testTheaterFiles = [];
+            const fileReadRegex = /\b(readFileSync|readFile|readTextFile|read_text)\s*\(/;
+            const sourcePathRefRegex = /(['"`])(?:(?!\1).)*?\.(?!test\.|spec\.|d\.)(ts|tsx|js|jsx|mjs|cjs|py|go|rs)\1/i;
+            const regexAssertionRegex = /(\.toMatch\s*\(|\.match\s*\(|assert\.match\s*\(|new\s+RegExp\s*\(|\.toContain\s*\(|\/[^/\r\n]+\/[gimsuy]*\.test\s*\()/;
+            const importOrMockLineRegex = /^\s*[+-]?\s*(import\s+|export\s+.*from\s+|(?:vi|jest)\.mock\s*\()/;
+
+            for (const tf of testFiles) {
+              let content = '';
+              if (fs.existsSync(tf)) {
+                try {
+                  content = fs.readFileSync(tf, 'utf8');
+                } catch (e) {}
+              }
+              if (!content) {
+                const fileObj = prFiles.find((p) => p.filename.replace(/\\/g, '/') === tf);
+                content = fileObj ? (fileObj.patch || '') : '';
+              }
+              if (content && fileReadRegex.test(content)) {
+                const nonImportBody = content
+                  .split(/\r?\n/)
+                  .filter((line) => !importOrMockLineRegex.test(line))
+                  .join('\n');
+                if (sourcePathRefRegex.test(nonImportBody) && regexAssertionRegex.test(nonImportBody)) {
+                  testTheaterFiles.push(tf);
+                }
+              }
+            }
+
+            if (testTheaterFiles.length > 0) {
+              escalationTriggers.push(`test-theater-detected (${testTheaterFiles.join(', ')})`);
+            }
+
+            const requiresArchitecturalDepth =
+              escalationTriggers.length > 0 ||
+              Boolean(jsonVerdict && jsonVerdict.review_depth === 'architectural');
+
+            // In 'auto' mode, only hard-fail when the repository has migrated to the v1.1 contract
+            // (risk_tier/structural_boundaries in pm/areas.json or v1.1 review-verdict.schema.json)
+            // or when the PR verdict JSON explicitly includes review_depth / architectural_checks.
+            // Unmigrated repositories receive a non-blocking ADVISORY warning until they sync TASK-125.
+            const repoEnforcesArchitecturalContract =
+              gateMode === 'strict' ||
+              (gateMode === 'auto' &&
+                (hasRiskMetadataInAreas ||
+                  hasV11VerdictSchema ||
+                  Boolean(jsonVerdict && (jsonVerdict.review_depth || jsonVerdict.architectural_checks))));
+
+            const requiredArchKeys = [
+              'import_boot_isolation',
+              'fail_closed_defaults',
+              'write_atomicity',
+              'no_test_theater',
+            ];
+            const archErrors = [];
+
+            if (requiresArchitecturalDepth && jsonVerdict) {
+              if (jsonVerdict.review_depth !== 'architectural') {
+                archErrors.push(`review_depth must be 'architectural' when escalation triggers apply (found: '${jsonVerdict.review_depth || 'standard'}')`);
+              }
+              const checks = jsonVerdict.architectural_checks;
+              if (!checks || typeof checks !== 'object') {
+                archErrors.push('Missing architectural_checks attestation object in verdict JSON');
+              } else {
+                for (const key of requiredArchKeys) {
+                  const val = checks[key];
+                  if (!val || !['PASS', 'FAIL', 'N/A'].includes(val)) {
+                    archErrors.push(`architectural_checks.${key} must be PASS | FAIL | N/A (found: '${val || 'missing'}')`);
+                  } else if (val === 'FAIL') {
+                    archErrors.push(`architectural_checks.${key} is FAIL`);
+                  }
+                }
+              }
+            }
+
+            const archAttestationValid = !requiresArchitecturalDepth || (Boolean(jsonVerdict) && archErrors.length === 0);
 
             core.setOutput('missing_count', missingSections.length.toString());
             core.setOutput('missing_sections', missingSections.join(', '));
             core.setOutput('has_pass_verdict', isPassVerdict ? 'true' : 'false');
+            core.setOutput('review_depth', requiresArchitecturalDepth ? 'architectural' : 'standard');
+            core.setOutput('escalation_triggers', escalationTriggers.join('; '));
+            core.setOutput('arch_attestation_valid', archAttestationValid ? 'true' : 'false');
             core.setOutput('verdict_json', jsonVerdict ? JSON.stringify(jsonVerdict) : 'none');
 
             let summaryMd = '## 📋 Tier 2 Agent Quality Gate Audit\n\n';
             summaryMd += '| Check | Status | Details |\n';
             summaryMd += '| :--- | :---: | :--- |\n';
             summaryMd += `| **Deterministic Check** | ✅ PASS | \`${{ inputs.build-command }}\` passed cleanly |\n`;
-            
+
             if (missingSections.length === 0) {
               summaryMd += `| **Evidence Pack Structure** | ✅ PASS | All ${requiredSections.length} required PR sections present |\n`;
             } else {
@@ -155,11 +362,29 @@ jobs:
               summaryMd += `| **Tier 1 Review Verdict** | ⚠️ PENDING/FAIL | Missing valid \`PASS\` JSON verdict in PR description |\n`;
             }
 
+            if (!requiresArchitecturalDepth) {
+              summaryMd += `| **Review Depth & Architectural Gate** | ✅ STANDARD | No architectural escalation triggers fired |\n`;
+            } else if (archAttestationValid) {
+              summaryMd += `| **Review Depth & Architectural Gate** | ✅ ARCHITECTURAL PASS | Escalated (${escalationTriggers.join(', ')}); all 4 \`architectural_checks\` attested |\n`;
+            } else if (repoEnforcesArchitecturalContract) {
+              summaryMd += `| **Review Depth & Architectural Gate** | ❌ ARCHITECTURAL FAIL | Escalated (${escalationTriggers.join(', ')}); ${archErrors.join('; ') || 'missing valid verdict JSON'} |\n`;
+            } else {
+              summaryMd += `| **Review Depth & Architectural Gate** | ⚠️ ADVISORY | Escalation triggers detected (${escalationTriggers.join(', ')}); sync WoW v1.1 schema to enforce \`architectural_checks\` |\n`;
+            }
+
             summaryMd += '\n> [!NOTE]\n> A human maintainer holds the merge key. Verify the findings before clicking Merge.\n';
 
             await core.summary.addRaw(summaryMd).write();
 
+            const failureReasons = [];
             if (missingSections.length > 0) {
-              core.setFailed(`PR description is missing required Evidence Pack sections: ${missingSections.join(', ')}`);
+              failureReasons.push(`PR description is missing required Evidence Pack sections: ${missingSections.join(', ')}`);
             }
-
+            if (requiresArchitecturalDepth && repoEnforcesArchitecturalContract && !archAttestationValid) {
+              failureReasons.push(
+                `Architectural Review Gate failed (triggers: ${escalationTriggers.join(', ')}): ${archErrors.join('; ') || 'missing valid PASS verdict JSON with architectural_checks'}`
+              );
+            }
+            if (failureReasons.length > 0) {
+              core.setFailed(failureReasons.join(' | '));
+            }

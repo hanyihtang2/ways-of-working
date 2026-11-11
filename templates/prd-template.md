@@ -33,14 +33,16 @@ areas:
 *Describe screen layouts, interactive behaviors, terminal outputs, or automation sequences.*
 
 ## 5. Technical Architecture & Constraints
-- **Primary Code Areas**: (See `pm/areas.json`)
+- **Primary Code Areas & Risk Tier**: (See `pm/areas.json` `risk_tier` and `structural_boundaries`)
+- **Runtime & Trust Boundaries**: (`client` vs. `server` vs. `edge` vs. `cli` isolation)
 - **Impacted Files & Modules**:
 - **Dependencies & Tools**:
-- **Constraints**: (Deterministic tests pass, 0 regressions, security boundaries preserved)
+- **Constraints**: (Deterministic tests pass, 0 regressions, import-time isolation, fail-closed guards, atomic multi-step writes, security boundaries preserved)
 
 ## 6. Acceptance Criteria
 - [ ] Core happy path functional and verified
-- [ ] Edge cases handled cleanly
+- [ ] Edge cases and negative paths fail closed with actionable errors
+- [ ] Runtime behavioral tests pass with zero static source-regex test theater
 - [ ] Deterministic verification passes cleanly (0 errors)
 - [ ] Code formatted and linted cleanly
 
@@ -48,4 +50,3 @@ areas:
 *Tasks are tracked in `tasks/` under `0-backlog`, `1-in-progress`, `2-review`, and `3-done`.*
 - [ ] `TASK-001`: [Title]
 - [ ] `TASK-002`: [Title]
-

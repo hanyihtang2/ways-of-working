@@ -1,17 +1,41 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "config": {
     "deterministicCommand": "npm test"
   },
   "areas": {
     "core": {
       "title": "Core Application Logic",
-      "description": "Main business logic, domain services, and models.",
+      "description": "Main business logic, domain services, and UI/API presentation layers.",
       "paths": [
         "src/"
       ],
-      "techStack": ["typescript"]
+      "techStack": ["typescript"],
+      "risk_tier": "standard",
+      "structural_boundaries": [
+        "client-server-boundary"
+      ]
+    },
+    "runtime/infrastructure": {
+      "title": "Runtime Boot, Persistence & Auth Boundaries",
+      "description": "Environment validation, database client initialization, auth/session middleware, edge proxies, and standalone CLI entrypoints.",
+      "paths": [
+        "src/db/",
+        "src/auth/",
+        "src/env",
+        "scripts/",
+        "bin/"
+      ],
+      "techStack": ["typescript", "node"],
+      "risk_tier": "high",
+      "structural_boundaries": [
+        "env-boot",
+        "db-client",
+        "auth-session",
+        "edge-proxy",
+        "cli-entrypoint"
+      ]
     },
     "automation/ci": {
       "title": "CI/CD & GitHub Actions",
@@ -19,7 +43,11 @@
       "paths": [
         ".github/workflows/"
       ],
-      "techStack": ["github-actions", "yaml"]
+      "techStack": ["github-actions", "yaml"],
+      "risk_tier": "high",
+      "structural_boundaries": [
+        "build-ci"
+      ]
     },
     "review/agentic": {
       "title": "Agentic Review & Quality Gates",
@@ -28,8 +56,8 @@
         "pm/standards/",
         "AGENTS.md"
       ],
-      "techStack": ["markdown"]
+      "techStack": ["markdown"],
+      "risk_tier": "standard"
     }
   }
 }
-
