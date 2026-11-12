@@ -1,6 +1,6 @@
 # Agent Review Contract & Severity Taxonomy Specification
 
-**Version:** 1.2.0  
+**Version:** 1.2.1  
 **Status:** Canonical  
 **Applies to:** Universal (Portfolio, PlateMark, MAKER, CommuteShift, and all agentic repositories)  
 **Governing Standard:** Two-Tier Agentic Review Model  
@@ -161,7 +161,9 @@ Finding Format Requirement:
 
 ## 5. Review Verdict Contract & Machine-Readable Schema
 
-Reviewer subagents must format their final review evaluation as structured JSON conforming to [`review-verdict.schema.json`](./schemas/review-verdict.schema.json).
+Reviewer subagents must format their final review evaluation as structured JSON conforming to [`review-verdict.schema.json`](./schemas/review-verdict.schema.json):
+- **Subagent Message Response:** Wrap the pretty-printed `ReviewVerdict` JSON inside a fenced ```` ```json ... ``` ```` Markdown code block (optionally preceded by a brief 1–3 line Markdown verdict/findings summary for human readability in the parent agent UI). Do not return bare unfenced JSON.
+- **Persisted Disk Artifact:** Because read-only reviewer subagents do not write files directly, the primary agent extracts the JSON payload and saves **raw** pretty-printed JSON (no Markdown code fences) to `.review/verdict-<task-id>.json`.
 
 ### Verdict States
 
@@ -171,7 +173,7 @@ Reviewer subagents must format their final review evaluation as structured JSON 
 
 ### Multi-Iteration Verdict Archiving & Negative-Knowledge Telemetry
 
-- **Active Verdict Path:** `.review/verdict-<task-id>.json` always holds the active/latest review verdict.
+- **Active Verdict Path:** `.review/verdict-<task-id>.json` always holds the active/latest review verdict as raw pretty-printed JSON on disk (no Markdown code fences).
 - **Prior Iteration Snapshots:** Whenever Iteration 1 returns `CHANGES_REQUESTED` (or before an earlier iteration is overwritten during `verdict` validation, `save`, or `review-pack`), the snapshot is archived non-destructively to `.review/verdict-<task-id>-iter<N>.json` (e.g., `.review/verdict-task-113-iter1.json`).
 - **PR Iteration History Rendering:**
   - Single-pass clean PRs (`Iteration 1 PASS`) embed only the active `### Review Verdict` JSON block with zero additional output.

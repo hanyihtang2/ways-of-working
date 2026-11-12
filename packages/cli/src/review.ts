@@ -680,6 +680,66 @@ export function loadReviewVerdict(rootDir: string, taskId: string): ReviewVerdic
 }
 
 /**
+ * Extracts and parses a ReviewVerdict payload from either raw JSON text or
+ * a Markdown conversational response containing a fenced ```json ... ``` block.
+ * Returns null if no valid JSON object can be extracted.
+ */
+export function extractVerdictPayload(rawInput: string): ReviewVerdict | null {
+  if (!rawInput || typeof rawInput !== "string") return null;
+
+  const trimmed = rawInput.trim();
+  if (!trimmed) return null;
+
+  const parseCandidateObject = (text: string): Record<string, unknown> | null => {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Ignore invalid JSON
+    }
+    return null;
+  };
+
+  // 1. Direct raw JSON object (e.g. from .review/verdict-<task-id>.json or raw JSON argument)
+  if (trimmed.startsWith("{")) {
+    const direct = parseCandidateObject(trimmed);
+    if (direct) return direct as unknown as ReviewVerdict;
+  }
+
+  // 2. Fenced Markdown code blocks:
+  //    Prefer line-anchored ```json blocks first (so inner escaped backticks inside JSON
+  //    string properties do not prematurely close the match), then line-anchored untagged
+  //    ``` blocks, then inline ```json / ``` blocks.
+  const fencePatterns: RegExp[] = [
+    /^[ \t]*```json[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*(?=\r?\n|$)/gim,
+    /^[ \t]*```[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*(?=\r?\n|$)/gim,
+    /```json\s*([\s\S]*?)\s*```/gi,
+    /```\s*([\s\S]*?)\s*```/gi,
+  ];
+
+  let firstObjectFallback: Record<string, unknown> | null = null;
+  for (const pattern of fencePatterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(rawInput)) !== null) {
+      const candidate = match[1].trim();
+      if (!candidate.startsWith("{")) continue;
+      const parsed = parseCandidateObject(candidate);
+      if (!parsed) continue;
+      if (typeof parsed.verdict === "string" || typeof parsed.task_id === "string") {
+        return parsed as unknown as ReviewVerdict;
+      }
+      if (!firstObjectFallback) {
+        firstObjectFallback = parsed;
+      }
+    }
+  }
+
+  return firstObjectFallback as unknown as ReviewVerdict | null;
+}
+
+/**
  * Idempotently snapshots a verdict to `.review/verdict-<task-id>-iter<N>.json`
  * when `verdict !== "PASS"` or `iteration < 2`.
  * Never overwrites an existing non-PASS snapshot at the same iteration with a PASS verdict.

@@ -18,6 +18,7 @@ import {
   archiveReviewVerdict,
   evaluateReviewEscalation,
   extractTaskSpec,
+  extractVerdictPayload,
   findActiveTask,
   findTaskFile,
   generatePrBody,
@@ -30,7 +31,7 @@ import {
   saveReviewVerdict,
   validateReviewVerdict,
 } from "./review.js";
-import type { EvidencePackData, ReviewVerdict } from "./types.js";
+import type { EvidencePackData } from "./types.js";
 
 const ROOT_DIR = process.cwd();
 const args = process.argv.slice(2);
@@ -153,18 +154,23 @@ async function run() {
       const sourceArg = isExplicitSave && args[1]?.toLowerCase() === "save" ? args[3] : args[2];
 
       if (!taskId) {
-        console.error("Usage: wow verdict <TASK-ID> [json-file]");
+        console.error("Usage: wow verdict <TASK-ID> [json-file-or-response]");
         process.exit(1);
       }
 
       if (sourceArg) {
-        const rawJson = fs.existsSync(sourceArg)
-          ? fs.readFileSync(sourceArg, "utf-8")
-          : sourceArg;
-        let parsedInput: ReviewVerdict;
-        try {
-          parsedInput = JSON.parse(rawJson) as ReviewVerdict;
-        } catch {
+        let rawContent = sourceArg;
+        if (!sourceArg.includes("\n") && !sourceArg.includes("\r")) {
+          try {
+            if (fs.existsSync(sourceArg) && fs.statSync(sourceArg).isFile()) {
+              rawContent = fs.readFileSync(sourceArg, "utf-8");
+            }
+          } catch {
+            // Treat as inline response string
+          }
+        }
+        const parsedInput = extractVerdictPayload(rawContent);
+        if (!parsedInput) {
           console.error(`Failed to parse verdict JSON from '${sourceArg}'.`);
           process.exit(1);
         }
@@ -253,7 +259,7 @@ Commands:
   wow all                      Regenerate both Kanban and Roadmap
   wow move <ID> <stage>        Move task (backlog | in-progress | review | done)
   wow review-pack [ID]         Run checks, extract diff, evaluate escalation, compile Evidence Pack
-  wow verdict <ID> [file]      Validate (and optionally save) review verdict JSON & snapshot iteration
+  wow verdict <ID> [source]    Validate (and optionally extract/save) review verdict JSON & snapshot iteration
   wow prepare-pr [ID]          Validate verdict & architectural sign-off, advance stage, prepare PR
 `);
       break;

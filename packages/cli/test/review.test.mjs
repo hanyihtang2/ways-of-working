@@ -9,8 +9,10 @@ import {
   detectTestTheater,
   evaluateReviewEscalation,
   extractVerdictFromPrBody,
+  extractVerdictPayload,
   generatePrBody,
   getVerdictIterationPath,
+  getVerdictPath,
   loadEvidencePack,
   loadPriorReviewVerdicts,
   loadReviewVerdict,
@@ -538,6 +540,90 @@ describe("Objective Auto-Escalation & Adversarial Architectural Review", () => {
       assert.equal(extracted.verdict, "PASS");
       assert.equal(extracted.iteration, 2);
       assert.equal(extracted.blocking_count, 0);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("extracts ReviewVerdict from fenced ```json subagent messages while persisting strict raw JSON on disk", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wow-test-verdict-extract-"));
+    try {
+      const sampleVerdict = {
+        task_id: "TASK-115",
+        verdict: "CHANGES_REQUESTED",
+        review_depth: "architectural",
+        iteration: 1,
+        evaluated_at: "2026-11-12T17:00:00Z",
+        reviewer: "agent:architect-reviewer",
+        deterministic_checks: { build: "SUCCESS", test: "SUCCESS" },
+        architectural_checks: {
+          import_boot_isolation: "PASS",
+          fail_closed_defaults: "FAIL",
+          write_atomicity: "PASS",
+          no_test_theater: "PASS",
+        },
+        blocking_count: 1,
+        summary: "Found 1 fail-closed default defect in CLI guard.",
+        findings: [
+          {
+            id: "F-001",
+            severity: "P1",
+            category: "fail-closed-defaults",
+            file: "src/guard.ts",
+            line_start: 12,
+            line_end: 18,
+            description: "Default parameter skips validation.",
+            evidence: "```json\n{\"env\": \"\"}\n``` triggers fail-open branch.",
+            suggested_fix: "Throw when env is empty.",
+          },
+        ],
+      };
+
+      // 1. Subagent Markdown response with 1-3 line summary + fenced ```json block
+      const markdownResponse = [
+        "**Verdict:** `CHANGES_REQUESTED` (`architectural`, 1 blocking defect).",
+        "See structured payload below:",
+        "",
+        "```json",
+        JSON.stringify(sampleVerdict, null, 2),
+        "```",
+      ].join("\n");
+
+      const extractedFromMd = extractVerdictPayload(markdownResponse);
+      assert.ok(extractedFromMd);
+      assert.equal(extractedFromMd.task_id, "TASK-115");
+      assert.equal(extractedFromMd.verdict, "CHANGES_REQUESTED");
+      assert.equal(extractedFromMd.findings.length, 1);
+      assert.ok(extractedFromMd.findings[0].evidence.includes("```json"));
+
+      // 2. Saving extracted verdict writes strict RAW JSON (no Markdown fences) to .review/verdict-<task-id>.json
+      const { verdictPath } = saveReviewVerdict(tmpDir, extractedFromMd);
+      assert.equal(verdictPath, getVerdictPath(tmpDir, "TASK-115"));
+      const rawOnDisk = fs.readFileSync(verdictPath, "utf-8");
+      assert.equal(rawOnDisk.trimStart().startsWith("{"), true);
+      assert.equal(rawOnDisk.startsWith("```"), false);
+      const parsedOnDisk = JSON.parse(rawOnDisk);
+      assert.equal(parsedOnDisk.task_id, "TASK-115");
+
+      const reloaded = loadReviewVerdict(tmpDir, "TASK-115");
+      assert.ok(reloaded);
+      assert.equal(reloaded.verdict, "CHANGES_REQUESTED");
+
+      // 3. Also accepts bare raw JSON and untagged ``` fenced blocks
+      const extractedRaw = extractVerdictPayload(JSON.stringify(sampleVerdict, null, 2));
+      assert.ok(extractedRaw);
+      assert.equal(extractedRaw.task_id, "TASK-115");
+
+      const untaggedMd = ["Summary line.", "", "```", JSON.stringify(sampleVerdict, null, 2), "```"].join("\n");
+      const extractedUntagged = extractVerdictPayload(untaggedMd);
+      assert.ok(extractedUntagged);
+      assert.equal(extractedUntagged.task_id, "TASK-115");
+
+      // 4. Fail-closed negative paths: empty, non-JSON prose, array, invalid JSON
+      assert.equal(extractVerdictPayload(""), null);
+      assert.equal(extractVerdictPayload("Verdict looks good, no JSON here."), null);
+      assert.equal(extractVerdictPayload("[1, 2, 3]"), null);
+      assert.equal(extractVerdictPayload("```json\n{ invalid json }\n```"), null);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

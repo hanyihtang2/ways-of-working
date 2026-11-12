@@ -1,6 +1,6 @@
 # Tier 1 Fresh-Context Reviewer Subagent Specification
 
-**Version:** 1.2.0  
+**Version:** 1.2.1  
 **Status:** Canonical  
 **Applies to:** Antigravity & AI Coding Agents across all repositories  
 **Governing Standard:** [`standards/AGENT_REVIEW_CONTRACT.md`](./AGENT_REVIEW_CONTRACT.md)  
@@ -177,7 +177,8 @@ Iteration 1:
   Primary runs: npm run agent:review-pack <TASK_ID>
     -> Auto-computes review_depth ("standard" | "architectural") & escalation_triggers.
   Primary invokes Tier 1 Reviewer Subagent (or Architect Reviewer when escalated).
-  Reviewer returns ReviewVerdict JSON.
+  Reviewer returns ReviewVerdict JSON in a fenced ```json code block.
+  Primary agent extracts and saves raw verdict JSON to .review/verdict-<task-id>.json.
 
 Decision Gate 1:
   IF verdict == "PASS" (blocking_count == 0 AND architectural_checks valid if escalated):
@@ -193,7 +194,8 @@ Decision Gate 1:
 
 Iteration 2:
   Reviewer evaluates updated diff against previous blockers and architectural checklist.
-  Reviewer returns updated ReviewVerdict JSON to .review/verdict-<task-id>.json.
+  Reviewer returns updated ReviewVerdict JSON in a fenced ```json code block.
+  Primary agent extracts and saves raw verdict JSON to .review/verdict-<task-id>.json.
 
 Decision Gate 2:
   IF verdict == "PASS":
@@ -209,7 +211,12 @@ Decision Gate 2:
 
 ## 6. Reviewer Subagent Response Specification
 
-The reviewer subagent must format its response as pure JSON conforming to `standards/schemas/review-verdict.schema.json`.
+Because subagent messages are rendered as Markdown in the parent agent UI, the reviewer subagent must format its **message response** by wrapping its pretty-printed `ReviewVerdict` JSON payload (conforming to `standards/schemas/review-verdict.schema.json`) inside a fenced ```` ```json ... ``` ```` Markdown code block. The fenced block may optionally be preceded by a brief (1–3 line) Markdown verdict/findings summary for human readability in the parent agent UI.
+
+> [!IMPORTANT]
+> **Subagent Message Response vs. Persisted Artifact on Disk:**
+> - **Subagent Message Response:** Markdown containing a fenced ```` ```json ... ``` ```` code block (never bare/unfenced JSON, whose newlines and indentation collapse when rendered as Markdown in the parent agent UI).
+> - **Persisted Disk Artifact (`.review/verdict-<task-id>.json`):** Strict **raw** pretty-printed JSON with **no** Markdown code fences. Because the reviewer subagent operates under read-only permissions (Section 2), the primary agent extracts the JSON payload from the subagent's fenced response and writes raw JSON to `.review/verdict-<task-id>.json` (or passes the response/file to `npm run agent:verdict <task-id> <json-file-or-response>`).
 
 ### Example A: Standard Review Verdict (`review_depth: "standard"`)
 
@@ -265,10 +272,11 @@ The reviewer subagent must format its response as pure JSON conforming to `stand
 
 To automate the transition from Tier 1 local approval to Tier 2 GitHub pull requests while preserving prior-iteration negative knowledge:
 
-1. **Save Active Verdict:** The reviewer subagent outputs or saves its latest verdict JSON to:
+1. **Save Active Verdict (Raw JSON on Disk):** The primary agent extracts the `ReviewVerdict` payload from the reviewer subagent's fenced ```` ```json ```` message response and persists it as **raw, pretty-printed JSON** (with no Markdown fences) to:
    ```text
    .review/verdict-<task-id>.json
    ```
+   (Alternatively, pass the subagent response or a file containing it directly to `npm run agent:verdict <task-id> <json-file-or-response>`, which extracts the fenced ```` ```json ```` block and writes strict raw JSON to disk.)
 2. **Non-Destructive Iteration Archiving (`.review/verdict-<task-id>-iter<N>.json`):**
    - `.review/verdict-<task-id>.json` is always the **active/latest** verdict.
    - Prior iterations are preserved as `.review/verdict-<task-id>-iter<N>.json` (e.g., `.review/verdict-task-113-iter1.json`):

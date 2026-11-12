@@ -44,7 +44,8 @@ When assigned a task (e.g. `TASK-001`):
    └── Subagent evaluates .review/evidence-pack-<task-id>.md
    └── If review_depth == "architectural": traces import isolation, fail-closed defaults,
        write atomicity, and test theater; attests architectural_checks in verdict JSON
-   └── Subagent saves verdict to: .review/verdict-<task-id>.json
+   └── Subagent returns verdict JSON inside a fenced ```json code block
+       (primary agent extracts and saves raw JSON to .review/verdict-<task-id>.json)
    └── Validate via: npm run agent:verdict <TASK-ID>
    └── (If CHANGES_REQUESTED: Iteration 1 is archived to .review/verdict-<task-id>-iter1.json;
        remediate blockers, re-run review-pack, and invoke Iteration 2 — max 2 iterations)
