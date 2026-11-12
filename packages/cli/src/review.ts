@@ -653,14 +653,187 @@ export function validateReviewVerdict(
   return { valid: errors.length === 0, errors };
 }
 
+export function getVerdictPath(rootDir: string, taskId: string): string {
+  return path.join(rootDir, ".review", `verdict-${taskId.toLowerCase()}.json`);
+}
+
+export function getVerdictIterationPath(
+  rootDir: string,
+  taskId: string,
+  iteration: number
+): string {
+  return path.join(
+    rootDir,
+    ".review",
+    `verdict-${taskId.toLowerCase()}-iter${iteration}.json`
+  );
+}
+
 export function loadReviewVerdict(rootDir: string, taskId: string): ReviewVerdict | null {
-  const verdictPath = path.join(rootDir, ".review", `verdict-${taskId.toLowerCase()}.json`);
+  const verdictPath = getVerdictPath(rootDir, taskId);
   if (!fs.existsSync(verdictPath)) return null;
   try {
     return JSON.parse(fs.readFileSync(verdictPath, "utf-8")) as ReviewVerdict;
   } catch {
     return null;
   }
+}
+
+/**
+ * Idempotently snapshots a verdict to `.review/verdict-<task-id>-iter<N>.json`
+ * when `verdict !== "PASS"` or `iteration < 2`.
+ * Never overwrites an existing non-PASS snapshot at the same iteration with a PASS verdict.
+ */
+export function archiveReviewVerdict(
+  rootDir: string,
+  verdict: ReviewVerdict
+): string | null {
+  if (
+    !verdict ||
+    typeof verdict !== "object" ||
+    !verdict.task_id ||
+    typeof verdict.iteration !== "number" ||
+    verdict.iteration < 1
+  ) {
+    return null;
+  }
+
+  if (verdict.verdict === "PASS" && verdict.iteration >= 2) {
+    return null;
+  }
+
+  const reviewDir = path.join(rootDir, ".review");
+  if (!fs.existsSync(reviewDir)) {
+    fs.mkdirSync(reviewDir, { recursive: true });
+  }
+
+  const iterPath = getVerdictIterationPath(rootDir, verdict.task_id, verdict.iteration);
+  if (fs.existsSync(iterPath) && verdict.verdict === "PASS") {
+    try {
+      const existingSnap = JSON.parse(fs.readFileSync(iterPath, "utf-8")) as Partial<ReviewVerdict>;
+      if (existingSnap && existingSnap.verdict && existingSnap.verdict !== "PASS") {
+        return iterPath;
+      }
+    } catch {
+      // Proceed to write valid JSON snapshot if existing file was unreadable
+    }
+  }
+
+  fs.writeFileSync(iterPath, JSON.stringify(verdict, null, 2), "utf-8");
+  return iterPath;
+}
+
+/**
+ * Safety-net helper invoked before compiling an updated evidence pack (`review-pack`)
+ * or before overwriting `.review/verdict-<task-id>.json`. If an existing active verdict
+ * from an earlier iteration / `CHANGES_REQUESTED` pass is present on disk, snapshots it
+ * to `.review/verdict-<task-id>-iter<N>.json`.
+ */
+export function archiveExistingVerdict(rootDir: string, taskId: string): string | null {
+  const existing = loadReviewVerdict(rootDir, taskId);
+  if (!existing) return null;
+  return archiveReviewVerdict(rootDir, existing);
+}
+
+/**
+ * Saves `verdict` as the active `.review/verdict-<task-id>.json` while preserving
+ * any earlier-iteration or non-PASS verdict in `.review/verdict-<task-id>-iter<N>.json`.
+ */
+export function saveReviewVerdict(
+  rootDir: string,
+  verdict: ReviewVerdict
+): { verdictPath: string; archivedPath: string | null } {
+  const reviewDir = path.join(rootDir, ".review");
+  if (!fs.existsSync(reviewDir)) {
+    fs.mkdirSync(reviewDir, { recursive: true });
+  }
+
+  let archivedPath: string | null = null;
+  const existing = loadReviewVerdict(rootDir, verdict.task_id);
+  if (
+    existing &&
+    typeof existing.iteration === "number" &&
+    existing.iteration >= 1 &&
+    (existing.verdict !== "PASS" ||
+      existing.iteration < 2 ||
+      existing.iteration < verdict.iteration)
+  ) {
+    const existingTaskId = existing.task_id || verdict.task_id;
+    const existingIterPath = getVerdictIterationPath(
+      rootDir,
+      existingTaskId,
+      existing.iteration
+    );
+    if (
+      !fs.existsSync(existingIterPath) ||
+      existing.verdict !== "PASS" ||
+      existing.iteration < verdict.iteration
+    ) {
+      fs.writeFileSync(existingIterPath, JSON.stringify(existing, null, 2), "utf-8");
+      archivedPath = existingIterPath;
+    }
+  }
+
+  const verdictPath = getVerdictPath(rootDir, verdict.task_id);
+  fs.writeFileSync(verdictPath, JSON.stringify(verdict, null, 2), "utf-8");
+
+  const selfArchived = archiveReviewVerdict(rootDir, verdict);
+  if (selfArchived) {
+    archivedPath = selfArchived;
+  }
+
+  return { verdictPath, archivedPath };
+}
+
+/**
+ * Loads prior-iteration verdict snapshots matching `.review/verdict-<task-id>-iter*.json`.
+ *
+ * Historical snapshots are validated structurally against the verdict contract WITHOUT
+ * cross-checking against the current (potentially overwritten Iteration 2) evidence pack,
+ * while excluding any snapshot with `iteration >= activeVerdict.iteration` so the final
+ * verdict is never duplicated.
+ */
+export function loadPriorReviewVerdicts(
+  rootDir: string,
+  taskId: string,
+  activeVerdict?: ReviewVerdict | null
+): ReviewVerdict[] {
+  const reviewDir = path.join(rootDir, ".review");
+  if (!fs.existsSync(reviewDir)) return [];
+
+  const effectiveActive =
+    activeVerdict === undefined ? loadReviewVerdict(rootDir, taskId) : activeVerdict;
+  const escapedTask = taskId.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const iterFileRegex = new RegExp(`^verdict-${escapedTask}-iter(\\d+)\\.json$`, "i");
+
+  const files = fs.readdirSync(reviewDir);
+  const byIteration = new Map<number, ReviewVerdict>();
+
+  for (const file of files) {
+    const match = file.match(iterFileRegex);
+    if (!match) continue;
+
+    const fullPath = path.join(reviewDir, file);
+    try {
+      const parsed = JSON.parse(fs.readFileSync(fullPath, "utf-8")) as ReviewVerdict;
+      // Validate structurally only — skip current evidence-pack requiredDepth cross-checks
+      const validation = validateReviewVerdict(parsed);
+      if (!validation.valid) continue;
+      if (parsed.task_id.toLowerCase() !== taskId.toLowerCase()) continue;
+      if (
+        effectiveActive &&
+        typeof effectiveActive.iteration === "number" &&
+        parsed.iteration >= effectiveActive.iteration
+      ) {
+        continue;
+      }
+      byIteration.set(parsed.iteration, parsed);
+    } catch {
+      // Ignore malformed snapshot files
+    }
+  }
+
+  return Array.from(byIteration.values()).sort((a, b) => a.iteration - b.iteration);
 }
 
 export function loadEvidencePack(rootDir: string, taskId: string): EvidencePackData | null {
@@ -681,10 +854,164 @@ export function loadEvidencePack(rootDir: string, taskId: string): EvidencePackD
   }
 }
 
+const MAX_HISTORY_SNIPPET_LENGTH = 220;
+
+/**
+ * Normalizes multi-line text for safe Markdown rendering inside `<details>`:
+ * - Replaces any triple-backtick code fences (` ``` `) with single backticks so
+ *   iteration history never introduces a second fenced code block in the PR body.
+ * - Collapses newlines and runs of whitespace.
+ * - Caps length at `maxLength` characters.
+ */
+export function sanitizeHistorySnippet(
+  text: string | undefined,
+  maxLength: number = MAX_HISTORY_SNIPPET_LENGTH
+): string {
+  if (!text) return "";
+  const normalized = text
+    .replace(/```+[a-z0-9_-]*/gi, "`")
+    .replace(/\r?\n+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+/**
+ * Formats prior-iteration verdicts as a collapsed `<details>` Markdown section.
+ * Strictly renders Markdown bullets without any ` ```json ` fenced code blocks.
+ */
+export function formatPriorVerdictsHistory(
+  priorVerdicts: ReviewVerdict[],
+  activeIteration?: number
+): string {
+  const filtered = (priorVerdicts || [])
+    .filter(
+      (pv) =>
+        pv &&
+        typeof pv === "object" &&
+        typeof pv.iteration === "number" &&
+        (activeIteration === undefined || pv.iteration < activeIteration)
+    )
+    .sort((a, b) => a.iteration - b.iteration);
+
+  if (filtered.length === 0) return "";
+
+  const summaryParts = filtered.map((pv) => {
+    const findings = Array.isArray(pv.findings) ? pv.findings : [];
+    const blockingCount =
+      findings.filter((f) => f.severity === "P0" || f.severity === "P1").length ||
+      pv.blocking_count ||
+      0;
+    const p2Count = findings.filter((f) => f.severity === "P2").length;
+    const p2Segment = p2Count > 0 ? `, ${p2Count} P2 resolved` : " resolved";
+    return `Iteration ${pv.iteration}: ${pv.verdict} — ${blockingCount} blocking P0/P1${p2Segment}`;
+  });
+
+  const lines: string[] = [
+    "<details>",
+    `<summary>Review Iteration History (${summaryParts.join("; ")})</summary>`,
+    "",
+  ];
+
+  filtered.forEach((pv, idx) => {
+    const findings = Array.isArray(pv.findings) ? pv.findings : [];
+    const blockingCount =
+      findings.filter((f) => f.severity === "P0" || f.severity === "P1").length ||
+      pv.blocking_count ||
+      0;
+
+    lines.push(`#### Iteration ${pv.iteration} — \`${pv.verdict}\``);
+    lines.push("");
+    lines.push(
+      `- **Reviewer:** \`${pv.reviewer || "agent:reviewer-subagent"}\` | **Review Depth:** \`${pv.review_depth || "standard"}\` | **Blocking Count:** \`${blockingCount}\` | **Evaluated At:** \`${pv.evaluated_at}\``
+    );
+    lines.push(`- **Summary:** ${sanitizeHistorySnippet(pv.summary, 300)}`);
+
+    if (pv.architectural_checks && typeof pv.architectural_checks === "object") {
+      const checkEntries = Object.entries(pv.architectural_checks)
+        .filter(([, status]) => status !== undefined)
+        .map(([key, status]) => `\`${key}: ${status}\``);
+      if (checkEntries.length > 0) {
+        lines.push(`- **Architectural Checks:** ${checkEntries.join(", ")}`);
+      }
+    }
+
+    if (findings.length > 0) {
+      lines.push(`- **Findings (${findings.length}):**`);
+      for (const f of findings) {
+        const lineRange =
+          typeof f.line_start === "number" &&
+          typeof f.line_end === "number" &&
+          f.line_end !== f.line_start
+            ? ` (L${f.line_start}-L${f.line_end})`
+            : typeof f.line_start === "number"
+              ? ` (L${f.line_start})`
+              : "";
+        const categoryBadge = f.category ? ` [\`${f.category}\`]` : "";
+        const criterionBadge = f.criterion_id ? ` (\`${f.criterion_id}\`)` : "";
+        lines.push(
+          `  - **${f.id}** [\`${f.severity}\`]${categoryBadge}${criterionBadge} — \`${f.file}\`${lineRange}: ${sanitizeHistorySnippet(f.description, 240)}`
+        );
+        lines.push(`    - **Evidence:** ${sanitizeHistorySnippet(f.evidence, 220)}`);
+        lines.push(`    - **Suggested Fix:** ${sanitizeHistorySnippet(f.suggested_fix, 220)}`);
+      }
+    } else {
+      lines.push("- **Findings:** _None_");
+    }
+
+    if (idx < filtered.length - 1) {
+      lines.push("");
+    }
+  });
+
+  lines.push("");
+  lines.push("</details>");
+  return lines.join("\n");
+}
+
+/**
+ * Extracts the canonical Review Verdict JSON object from a PR description body.
+ * Strips any collapsed `<details>...</details>` iteration history blocks first and
+ * anchors to the `### Review Verdict` section so prior-iteration history or prose
+ * snippets never shadow the active verdict.
+ */
+export function extractVerdictFromPrBody(prBody: string): ReviewVerdict | null {
+  if (!prBody) return null;
+  const bodyWithoutDetails = prBody.replace(/<details\b[^>]*>[\s\S]*?<\/details>/gi, "");
+  const verdictSectionMatch = bodyWithoutDetails.match(
+    /###\s+Review Verdict[\s\S]*?```json\s*([\s\S]*?)\s*```/i
+  );
+
+  const candidateBlocks: string[] = [];
+  if (verdictSectionMatch && verdictSectionMatch[1]) {
+    candidateBlocks.push(verdictSectionMatch[1]);
+  }
+
+  const jsonBlockRegex = /```json\s*([\s\S]*?)\s*```/gi;
+  let blockMatch: RegExpExecArray | null;
+  while ((blockMatch = jsonBlockRegex.exec(bodyWithoutDetails)) !== null) {
+    candidateBlocks.push(blockMatch[1]);
+  }
+
+  for (const rawBlock of candidateBlocks) {
+    try {
+      const parsed = JSON.parse(rawBlock) as Partial<ReviewVerdict>;
+      if (parsed && typeof parsed === "object" && typeof parsed.verdict === "string") {
+        return parsed as ReviewVerdict;
+      }
+    } catch {
+      // Ignore malformed JSON block
+    }
+  }
+  return null;
+}
+
 export function generatePrBody(
   spec: TaskSpec,
   verdict: ReviewVerdict,
-  pack?: EvidencePackData | null
+  pack?: EvidencePackData | null,
+  priorVerdicts?: ReviewVerdict[] | null
 ): string {
   const reviewDepth: ReviewDepth = verdict.review_depth || pack?.reviewDepth || "standard";
   const acLines =
@@ -706,6 +1033,11 @@ export function generatePrBody(
     pack?.escalationTriggers && pack.escalationTriggers.length > 0
       ? pack.escalationTriggers.map((t) => `  - \`${t.id}\`: ${t.reason}`).join("\n")
       : "  - _None (standard review depth)_";
+
+  const iterationHistoryBlock =
+    priorVerdicts && priorVerdicts.length > 0
+      ? formatPriorVerdictsHistory(priorVerdicts, verdict.iteration)
+      : "";
 
   return [
     "## Summary of Intent",
@@ -745,6 +1077,7 @@ export function generatePrBody(
     "```json",
     JSON.stringify(verdict, null, 2),
     "```",
+    ...(iterationHistoryBlock ? ["", iterationHistoryBlock] : []),
     "",
     "### Deterministic Build Verification",
     "",

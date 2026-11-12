@@ -14,6 +14,8 @@ import {
   moveTaskCommand,
 } from "./pm.js";
 import {
+  archiveExistingVerdict,
+  archiveReviewVerdict,
   evaluateReviewEscalation,
   extractTaskSpec,
   findActiveTask,
@@ -21,12 +23,14 @@ import {
   generatePrBody,
   getGitContext,
   loadEvidencePack,
+  loadPriorReviewVerdicts,
   loadReviewVerdict,
   matchAreas,
   runDeterministicCheck,
+  saveReviewVerdict,
   validateReviewVerdict,
 } from "./review.js";
-import type { EvidencePackData } from "./types.js";
+import type { EvidencePackData, ReviewVerdict } from "./types.js";
 
 const ROOT_DIR = process.cwd();
 const args = process.argv.slice(2);
@@ -96,6 +100,11 @@ async function run() {
       const reviewDir = path.join(ROOT_DIR, ".review");
       if (!fs.existsSync(reviewDir)) fs.mkdirSync(reviewDir, { recursive: true });
 
+      const archivedIterPath = archiveExistingVerdict(ROOT_DIR, spec.id);
+      if (archivedIterPath) {
+        console.log(`\x1b[36mℹ Archived prior iteration verdict:\x1b[0m ${archivedIterPath}`);
+      }
+
       const packData: EvidencePackData = {
         taskId: spec.id,
         targetBranch: baseBranch,
@@ -136,12 +145,32 @@ async function run() {
       break;
     }
 
+    case "save-verdict":
     case "verdict": {
-      const taskId = args[1];
+      const isExplicitSave =
+        command === "save-verdict" || (args[1] && args[1].toLowerCase() === "save");
+      const taskId = isExplicitSave && args[1]?.toLowerCase() === "save" ? args[2] : args[1];
+      const sourceArg = isExplicitSave && args[1]?.toLowerCase() === "save" ? args[3] : args[2];
+
       if (!taskId) {
-        console.error("Usage: wow verdict <TASK-ID>");
+        console.error("Usage: wow verdict <TASK-ID> [json-file]");
         process.exit(1);
       }
+
+      if (sourceArg) {
+        const rawJson = fs.existsSync(sourceArg)
+          ? fs.readFileSync(sourceArg, "utf-8")
+          : sourceArg;
+        let parsedInput: ReviewVerdict;
+        try {
+          parsedInput = JSON.parse(rawJson) as ReviewVerdict;
+        } catch {
+          console.error(`Failed to parse verdict JSON from '${sourceArg}'.`);
+          process.exit(1);
+        }
+        saveReviewVerdict(ROOT_DIR, parsedInput);
+      }
+
       const v = loadReviewVerdict(ROOT_DIR, taskId);
       if (!v) {
         console.error(`No verdict found for ${taskId} in .review/verdict-${taskId.toLowerCase()}.json`);
@@ -157,10 +186,15 @@ async function run() {
         validation.errors.forEach((e) => console.error(`  - ${e}`));
         process.exit(1);
       }
+
+      const archivedPath = archiveReviewVerdict(ROOT_DIR, v);
       const depthLabel = v.review_depth || pack?.reviewDepth || "standard";
       console.log(
-        `\x1b[32m✔ Verdict Valid:\x1b[0m ${v.verdict} [depth=${depthLabel}] (${v.blocking_count} blockers)`
+        `\x1b[32m✔ Verdict Valid:\x1b[0m ${v.verdict} [depth=${depthLabel}, iter=${v.iteration}] (${v.blocking_count} blockers)`
       );
+      if (archivedPath) {
+        console.log(`\x1b[36mℹ Snapshot preserved:\x1b[0m ${archivedPath}`);
+      }
       break;
     }
 
@@ -191,13 +225,19 @@ async function run() {
         process.exit(1);
       }
 
+      const priorVerdicts = loadPriorReviewVerdicts(ROOT_DIR, spec.id, v);
       const reviewDir = path.join(ROOT_DIR, ".review");
       if (!fs.existsSync(reviewDir)) fs.mkdirSync(reviewDir, { recursive: true });
       const prBodyPath = path.join(reviewDir, `pr-body-${spec.id.toLowerCase()}.md`);
-      fs.writeFileSync(prBodyPath, generatePrBody(spec, v, pack), "utf-8");
+      fs.writeFileSync(prBodyPath, generatePrBody(spec, v, pack, priorVerdicts), "utf-8");
 
       moveTaskCommand(ROOT_DIR, spec.id, "review");
       console.log(`\x1b[32m✔ Task moved to review & boards synchronized.\x1b[0m`);
+      if (priorVerdicts.length > 0) {
+        console.log(
+          `\x1b[36mℹ Included ${priorVerdicts.length} prior review iteration(s) in PR history.\x1b[0m`
+        );
+      }
       console.log(`\x1b[32m✔ Generated PR Body:\x1b[0m ${prBodyPath}`);
       break;
     }
@@ -213,7 +253,7 @@ Commands:
   wow all                      Regenerate both Kanban and Roadmap
   wow move <ID> <stage>        Move task (backlog | in-progress | review | done)
   wow review-pack [ID]         Run checks, extract diff, evaluate escalation, compile Evidence Pack
-  wow verdict <ID>             Validate review verdict JSON against schema & required review depth
+  wow verdict <ID> [file]      Validate (and optionally save) review verdict JSON & snapshot iteration
   wow prepare-pr [ID]          Validate verdict & architectural sign-off, advance stage, prepare PR
 `);
       break;

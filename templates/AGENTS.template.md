@@ -46,11 +46,13 @@ When assigned a task (e.g. `TASK-001`):
        write atomicity, and test theater; attests architectural_checks in verdict JSON
    └── Subagent saves verdict to: .review/verdict-<task-id>.json
    └── Validate via: npm run agent:verdict <TASK-ID>
-   └── (If CHANGES_REQUESTED: address blockers, max 2 iterations)
+   └── (If CHANGES_REQUESTED: Iteration 1 is archived to .review/verdict-<task-id>-iter1.json;
+       remediate blockers, re-run review-pack, and invoke Iteration 2 — max 2 iterations)
 
 5. Prepare Pull Request
    └── Run: npm run agent:prepare-pr <TASK-ID>
    └── Auto-moves task to 2-review/, syncs KANBAN.md, and creates .review/pr-body-<task-id>.md
+       (automatically embeds collapsed <details> Review Iteration History when prior iterations exist)
    └── Push branch & open PR with body-file
 ```
 

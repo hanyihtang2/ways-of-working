@@ -1,6 +1,6 @@
 # Agent Review Contract & Severity Taxonomy Specification
 
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Canonical  
 **Applies to:** Universal (Portfolio, PlateMark, MAKER, CommuteShift, and all agentic repositories)  
 **Governing Standard:** Two-Tier Agentic Review Model  
@@ -168,6 +168,14 @@ Reviewer subagents must format their final review evaluation as structured JSON 
 - **`PASS`**: `blocking_count === 0` (no P0 or P1 findings). When `review_depth === "architectural"`, `architectural_checks` must be present and contain zero `"FAIL"` entries. P2 nits may be present. The branch is cleared for pull request creation and Tier 2 quality gates.
 - **`CHANGES_REQUESTED`**: `blocking_count > 0` (at least one P0 or P1 finding) or any `architectural_checks` entry is `"FAIL"`. The primary agent must remediate all blockers and request a re-review (up to iteration 2).
 - **`ESCALATED_TO_HUMAN`**: The review has reached the maximum iteration limit (2 passes) and blockers remain unresolved, or a Pre-Coding Spec Challenge identified an unresolvable ADR/boundary conflict. Execution pauses and alerts the human engineer with a structured summary.
+
+### Multi-Iteration Verdict Archiving & Negative-Knowledge Telemetry
+
+- **Active Verdict Path:** `.review/verdict-<task-id>.json` always holds the active/latest review verdict.
+- **Prior Iteration Snapshots:** Whenever Iteration 1 returns `CHANGES_REQUESTED` (or before an earlier iteration is overwritten during `verdict` validation, `save`, or `review-pack`), the snapshot is archived non-destructively to `.review/verdict-<task-id>-iter<N>.json` (e.g., `.review/verdict-task-113-iter1.json`).
+- **PR Iteration History Rendering:**
+  - Single-pass clean PRs (`Iteration 1 PASS`) embed only the active `### Review Verdict` JSON block with zero additional output.
+  - Multi-iteration PRs (`Iteration 2 PASS` after `Iteration 1 CHANGES_REQUESTED`) render a collapsed `<details>` Markdown summary (`Review Iteration History`) after the primary `### Review Verdict` ` ```json ` block documenting resolved `P0`/`P1`/`P2` findings from prior iterations without introducing additional ` ```json ` fenced code blocks.
 
 ---
 

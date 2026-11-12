@@ -4,10 +4,18 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  archiveExistingVerdict,
+  archiveReviewVerdict,
   detectTestTheater,
   evaluateReviewEscalation,
+  extractVerdictFromPrBody,
   generatePrBody,
+  getVerdictIterationPath,
+  loadEvidencePack,
+  loadPriorReviewVerdicts,
+  loadReviewVerdict,
   matchAreas,
+  saveReviewVerdict,
   validateReviewVerdict,
 } from "../dist/review.js";
 
@@ -251,5 +259,287 @@ describe("Objective Auto-Escalation & Adversarial Architectural Review", () => {
     );
     assert.ok(prBody.includes("- **Review Depth:** `architectural`"));
     assert.ok(prBody.includes('"import_boot_isolation": "PASS"'));
+  });
+
+  it("archives Iteration 1 CHANGES_REQUESTED verdicts prior to Iteration 2 overwrite without failing on stale evidence-pack cross-checks", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wow-test-iter-archive-"));
+    try {
+      const reviewDir = path.join(tmpDir, ".review");
+      fs.mkdirSync(reviewDir, { recursive: true });
+
+      const iter1Verdict = {
+        task_id: "TASK-113",
+        verdict: "CHANGES_REQUESTED",
+        review_depth: "standard",
+        iteration: 1,
+        evaluated_at: "2026-11-12T10:00:00Z",
+        reviewer: "agent:reviewer-subagent",
+        deterministic_checks: { build: "SUCCESS" },
+        blocking_count: 1,
+        summary: "Iteration 1 caught a fail-open default parameter in the seed guard.",
+        findings: [
+          {
+            id: "F-001",
+            severity: "P1",
+            category: "fail-closed-defaults",
+            file: "src/db/seed-guard.ts",
+            line_start: 14,
+            line_end: 21,
+            description: "Default parameter nodeEnv = '' silently skips production check.",
+            evidence: "Calling assertSafeEnvironment() with NODE_ENV=production returns without throwing.",
+            suggested_fix: "Resolve process.env.NODE_ENV when nodeEnv is omitted and fail closed.",
+          },
+        ],
+      };
+
+      // Simulate subagent writing .review/verdict-task-113.json directly in Iteration 1
+      fs.writeFileSync(
+        path.join(reviewDir, "verdict-task-113.json"),
+        JSON.stringify(iter1Verdict, null, 2),
+        "utf-8"
+      );
+
+      // Safety-net snapshot during Iteration 2 review-pack compilation
+      const archivedSafetyPath = archiveExistingVerdict(tmpDir, "TASK-113");
+      assert.equal(archivedSafetyPath, getVerdictIterationPath(tmpDir, "TASK-113", 1));
+      assert.equal(fs.existsSync(archivedSafetyPath), true);
+
+      // Iteration 2 evidence pack escalates to architectural depth
+      const iter2Pack = {
+        taskId: "TASK-113",
+        targetBranch: "main",
+        currentBranch: "feat/task-113",
+        timestamp: "2026-11-12T10:15:00Z",
+        reviewDepth: "architectural",
+        escalationTriggers: [
+          {
+            id: "high-risk-area",
+            category: "area-risk-boundary",
+            reason: "Touched runtime/infrastructure",
+            matchedFiles: ["src/db/seed-guard.ts"],
+          },
+        ],
+        testTheaterSuspects: [],
+        taskSpec: {
+          id: "TASK-113",
+          title: "Harden seed guard",
+          parentFeature: "FEAT-012",
+          filePath: "pm/features/FEAT-012/tasks/1-in-progress/TASK-113.md",
+          stage: "1-in-progress",
+          objective: "Enforce fail-closed environment checks in seed guard.",
+          acceptanceCriteria: [{ text: "Seed guard fails closed on production", completed: true }],
+          targetPaths: ["src/db/"],
+          declaredAreas: ["runtime/infrastructure"],
+        },
+        matchedAreas: [],
+        outOfScopeFiles: [],
+        deterministicChecks: [
+          {
+            name: "deterministic",
+            command: "npm test",
+            status: "SUCCESS",
+            output: "ok",
+            exitCode: 0,
+            durationMs: 120,
+          },
+        ],
+        changedFiles: ["src/db/seed-guard.ts"],
+        gitDiff: "",
+      };
+      fs.writeFileSync(
+        path.join(reviewDir, "evidence-pack-task-113.md"),
+        JSON.stringify(iter2Pack, null, 2),
+        "utf-8"
+      );
+
+      // Iteration 2 PASS verdict overwrites active verdict-task-113.json
+      const iter2Verdict = {
+        task_id: "TASK-113",
+        verdict: "PASS",
+        review_depth: "architectural",
+        iteration: 2,
+        evaluated_at: "2026-11-12T10:20:00Z",
+        reviewer: "agent:architect-reviewer",
+        deterministic_checks: { build: "SUCCESS", test: "SUCCESS" },
+        architectural_checks: {
+          import_boot_isolation: "PASS",
+          fail_closed_defaults: "PASS",
+          write_atomicity: "N/A",
+          no_test_theater: "PASS",
+        },
+        blocking_count: 0,
+        summary: "All Iteration 1 blockers remediated and architectural checks verified.",
+        findings: [],
+      };
+      saveReviewVerdict(tmpDir, iter2Verdict);
+
+      const loadedActive = loadReviewVerdict(tmpDir, "TASK-113");
+      assert.equal(loadedActive.verdict, "PASS");
+      assert.equal(loadedActive.iteration, 2);
+
+      // Active verdict must pass strict cross-check against Iteration 2 evidence pack
+      const loadedPack = loadEvidencePack(tmpDir, "TASK-113");
+      const activeValidation = validateReviewVerdict(loadedActive, {
+        requiredDepth: loadedPack.reviewDepth,
+        escalationTriggers: loadedPack.escalationTriggers,
+      });
+      assert.equal(activeValidation.valid, true);
+
+      // Prior Iteration 1 snapshot (review_depth: 'standard') loads cleanly without failing
+      // against the overwritten Iteration 2 architectural evidence pack
+      const priorVerdicts = loadPriorReviewVerdicts(tmpDir, "TASK-113", loadedActive);
+      assert.equal(priorVerdicts.length, 1);
+      assert.equal(priorVerdicts[0].iteration, 1);
+      assert.equal(priorVerdicts[0].verdict, "CHANGES_REQUESTED");
+      assert.equal(priorVerdicts[0].findings[0].id, "F-001");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("omits iteration history on single-pass PRs and renders single-JSON-fence <details> history on multi-iteration PRs", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wow-test-pr-history-"));
+    try {
+      const spec = {
+        id: "TASK-113",
+        title: "Harden seed guard and archive verdicts",
+        parentFeature: "FEAT-012",
+        filePath: "pm/features/FEAT-012/tasks/1-in-progress/TASK-113.md",
+        stage: "1-in-progress",
+        objective: "Preserve prior review iterations as negative knowledge in PR descriptions.",
+        acceptanceCriteria: [{ text: "Preserve Iteration 1 findings in PR body", completed: true }],
+        targetPaths: ["src/"],
+        declaredAreas: ["core"],
+      };
+
+      // 1. Clean single-pass Iteration 1 PASS
+      const singlePassVerdict = {
+        task_id: "TASK-113",
+        verdict: "PASS",
+        review_depth: "standard",
+        iteration: 1,
+        evaluated_at: "2026-11-12T11:00:00Z",
+        reviewer: "agent:reviewer-subagent",
+        deterministic_checks: { build: "SUCCESS" },
+        blocking_count: 0,
+        summary: "Clean single-pass implementation.",
+        findings: [],
+      };
+
+      // Even if iter1 snapshot is archived during `verdict` validation, loadPriorReviewVerdicts
+      // excludes snapshots with iteration >= activeVerdict.iteration (1 >= 1).
+      archiveReviewVerdict(tmpDir, singlePassVerdict);
+      const singlePassPriors = loadPriorReviewVerdicts(tmpDir, "TASK-113", singlePassVerdict);
+      assert.equal(singlePassPriors.length, 0);
+
+      const cleanPrBody = generatePrBody(spec, singlePassVerdict, null, singlePassPriors);
+      assert.equal(cleanPrBody.includes("<details>"), false);
+      assert.equal(cleanPrBody.includes("Review Iteration History"), false);
+      assert.equal((cleanPrBody.match(/```json/g) || []).length, 1);
+
+      // 2. Multi-iteration PR (Iteration 1 CHANGES_REQUESTED -> Iteration 2 PASS)
+      const iter1ChangesRequested = {
+        task_id: "TASK-113",
+        verdict: "CHANGES_REQUESTED",
+        review_depth: "architectural",
+        iteration: 1,
+        evaluated_at: "2026-11-12T11:10:00Z",
+        reviewer: "agent:architect-reviewer",
+        deterministic_checks: { build: "SUCCESS" },
+        architectural_checks: {
+          import_boot_isolation: "PASS",
+          fail_closed_defaults: "FAIL",
+          write_atomicity: "PASS",
+          no_test_theater: "PASS",
+        },
+        blocking_count: 2,
+        summary: "Found 2 blocking defects and 1 P2 suggestion in Iteration 1.",
+        findings: [
+          {
+            id: "F-001",
+            severity: "P0",
+            category: "fail-closed-defaults",
+            criterion_id: "ARCH-2",
+            file: "src/guard.ts",
+            line_start: 10,
+            line_end: 18,
+            description: "Production guard bypassed when env parameter is empty.",
+            evidence: "```json\n{\"bypass\": true}\n```\nMulti-line evidence snippet that must not create a second JSON fence.",
+            suggested_fix: "```ts\nif (!env) throw new Error('Missing env');\n```",
+          },
+          {
+            id: "F-002",
+            severity: "P1",
+            category: "scope-boundary",
+            file: "src/index.ts",
+            line_start: 42,
+            line_end: 42,
+            description: "Missing error boundary around file write.",
+            evidence: "Unhandled EACCES exception when directory is read-only.",
+            suggested_fix: "Ensure parent directory exists and propagate structured error.",
+          },
+          {
+            id: "F-003",
+            severity: "P2",
+            category: "nit",
+            file: "src/guard.ts",
+            line_start: 5,
+            line_end: 5,
+            description: "Consider exporting guard constant for reuse in unit tests.",
+            evidence: "Minor ergonomics improvement.",
+            suggested_fix: "Export DEFAULT_GUARD_TIMEOUT constant.",
+          },
+        ],
+      };
+
+      const iter2PassVerdict = {
+        task_id: "TASK-113",
+        verdict: "PASS",
+        review_depth: "architectural",
+        iteration: 2,
+        evaluated_at: "2026-11-12T11:30:00Z",
+        reviewer: "agent:architect-reviewer",
+        deterministic_checks: { build: "SUCCESS", test: "SUCCESS" },
+        architectural_checks: {
+          import_boot_isolation: "PASS",
+          fail_closed_defaults: "PASS",
+          write_atomicity: "PASS",
+          no_test_theater: "PASS",
+        },
+        blocking_count: 0,
+        summary: "All Iteration 1 blockers and P2 suggestions resolved cleanly.",
+        findings: [],
+      };
+
+      const multiPrBody = generatePrBody(spec, iter2PassVerdict, null, [iter1ChangesRequested]);
+
+      // Verify collapsed <details> summary and finding details
+      assert.ok(multiPrBody.includes("<details>"));
+      assert.ok(
+        multiPrBody.includes(
+          "<summary>Review Iteration History (Iteration 1: CHANGES_REQUESTED — 2 blocking P0/P1, 1 P2 resolved)</summary>"
+        )
+      );
+      assert.ok(multiPrBody.includes("**F-001** [`P0`] [`fail-closed-defaults`] (`ARCH-2`) — `src/guard.ts` (L10-L18)"));
+      assert.ok(multiPrBody.includes("**F-002** [`P1`] [`scope-boundary`] — `src/index.ts` (L42)"));
+      assert.ok(multiPrBody.includes("**F-003** [`P2`] [`nit`] — `src/guard.ts` (L5)"));
+
+      // Critical constraint: strictly 1 ```json block in the entire PR body (no triple backticks inside <details>)
+      const jsonFenceMatches = multiPrBody.match(/```json/gi) || [];
+      assert.equal(jsonFenceMatches.length, 1);
+
+      const detailsSectionMatch = multiPrBody.match(/<details>[\s\S]*?<\/details>/);
+      assert.ok(detailsSectionMatch);
+      assert.equal(detailsSectionMatch[0].includes("```"), false);
+
+      // Verify Tier 2 CI extraction unambiguously parses the final Iteration 2 PASS verdict
+      const extracted = extractVerdictFromPrBody(multiPrBody);
+      assert.ok(extracted);
+      assert.equal(extracted.verdict, "PASS");
+      assert.equal(extracted.iteration, 2);
+      assert.equal(extracted.blocking_count, 0);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

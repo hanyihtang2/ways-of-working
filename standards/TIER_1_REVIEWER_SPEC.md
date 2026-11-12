@@ -1,6 +1,6 @@
 # Tier 1 Fresh-Context Reviewer Subagent Specification
 
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Canonical  
 **Applies to:** Antigravity & AI Coding Agents across all repositories  
 **Governing Standard:** [`standards/AGENT_REVIEW_CONTRACT.md`](./AGENT_REVIEW_CONTRACT.md)  
@@ -184,19 +184,21 @@ Decision Gate 1:
     -> Success! Move task to 2-review.
     -> Open Pull Request with Evidence Pack.
   IF verdict == "CHANGES_REQUESTED":
+    -> Snapshot Iteration 1 verdict to .review/verdict-<task-id>-iter1.json.
     -> Primary Agent reads P0/P1 findings.
     -> Primary Agent edits code to address findings.
     -> Primary Agent runs deterministic checks (verifies fix).
-    -> Primary Agent generates updated evidence pack.
+    -> Primary Agent generates updated evidence pack (safety-net archives any unarchived prior verdict).
     -> Primary Agent invokes Reviewer Subagent for Iteration 2.
 
 Iteration 2:
   Reviewer evaluates updated diff against previous blockers and architectural checklist.
-  Reviewer returns updated ReviewVerdict JSON.
+  Reviewer returns updated ReviewVerdict JSON to .review/verdict-<task-id>.json.
 
 Decision Gate 2:
   IF verdict == "PASS":
     -> Success! Move task to 2-review.
+    -> Open Pull Request with active PASS verdict + collapsed <details> Iteration 1 history.
   IF verdict == "CHANGES_REQUESTED":
     -> Loop ceiling reached.
     -> Set status to ESCALATED_TO_HUMAN.
@@ -259,19 +261,27 @@ The reviewer subagent must format its response as pure JSON conforming to `stand
 }
 ```
 
-### Verdict Output & PR Preparation Pipeline
+### Verdict Output, Multi-Iteration Archiving & PR Preparation Pipeline
 
-To automate the transition from Tier 1 local approval to Tier 2 GitHub pull requests:
+To automate the transition from Tier 1 local approval to Tier 2 GitHub pull requests while preserving prior-iteration negative knowledge:
 
-1. **Save Verdict:** The reviewer subagent outputs or saves its verdict JSON to:
+1. **Save Active Verdict:** The reviewer subagent outputs or saves its latest verdict JSON to:
    ```text
    .review/verdict-<task-id>.json
    ```
-2. **Validate Verdict:** The verdict is validated against `standards/schemas/review-verdict.schema.json` (including required `architectural_checks` when escalation triggers fired) via:
+2. **Non-Destructive Iteration Archiving (`.review/verdict-<task-id>-iter<N>.json`):**
+   - `.review/verdict-<task-id>.json` is always the **active/latest** verdict.
+   - Prior iterations are preserved as `.review/verdict-<task-id>-iter<N>.json` (e.g., `.review/verdict-task-113-iter1.json`):
+     - Automatically snapshotted idempotently when saving or validating a verdict (`verdict !== "PASS"` or `iteration < 2`, or when replacing an earlier iteration).
+     - Automatically snapshotted as a safety net when compiling an updated evidence pack (`npm run agent:review-pack <task-id>`) if an existing `.review/verdict-<task-id>.json` from an earlier iteration is present on disk.
+   - Historical snapshots (`verdict-<task-id>-iter*.json` with `iteration < activeVerdict.iteration`) are validated structurally against `review-verdict.schema.json` without cross-checking against the overwritten Iteration 2 evidence pack, while the active `.review/verdict-<task-id>.json` enforces strict fail-closed evidence-pack cross-checking.
+3. **Validate Verdict:** Validate the active verdict against `standards/schemas/review-verdict.schema.json` (including required `architectural_checks` when escalation triggers fired) via:
    ```bash
    npm run agent:verdict <task-id>
    ```
-3. **Automate PR Preparation:** Once the verdict is `PASS` with 0 blocking defects and valid architectural attestations, prepare the PR:
+4. **Automate PR Preparation & Iteration History Rendering:** Once the active verdict is `PASS` with 0 blocking defects and valid architectural attestations, prepare the PR:
    ```bash
    npm run agent:prepare-pr <task-id>
    ```
+   - **Single-Pass Clean PR (`Iteration 1 PASS`):** Renders only the primary `### Review Verdict` block with zero additional clutter.
+   - **Multi-Iteration PR (`Iteration 2 PASS` after `Iteration 1 CHANGES_REQUESTED`):** Renders a collapsed `<details>` `Review Iteration History` Markdown section immediately after the primary `### Review Verdict` ` ```json ` block summarizing resolved `P0`/`P1`/`P2` findings from prior iterations. To preserve unambiguous Tier 2 CI parsing, the `<details>` block is rendered strictly as Markdown bullets with **no** extra ` ```json ` fenced code blocks.

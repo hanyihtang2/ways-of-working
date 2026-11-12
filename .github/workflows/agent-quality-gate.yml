@@ -131,16 +131,37 @@ jobs:
               }
             }
 
-            // Look for JSON block in PR body
+            // Extract canonical Review Verdict JSON block from PR body:
+            // 1. Strip any collapsed <details>...</details> iteration history blocks first so
+            //    prior-iteration notes can never shadow the active verdict.
+            // 2. Anchor first to the '### Review Verdict' section, falling back to scanning
+            //    fenced ```json blocks for a valid verdict object.
             let jsonVerdict = null;
-            const jsonMatch = body.match(/```json\s*([\s\S]*?)\s*```/);
-            if (jsonMatch) {
+            const bodyWithoutDetails = body.replace(/<details\b[^>]*>[\s\S]*?<\/details>/gi, '');
+            const verdictSectionMatch = bodyWithoutDetails.match(
+              /###\s+Review Verdict[\s\S]*?```json\s*([\s\S]*?)\s*```/i
+            );
+            const candidateBlocks = [];
+            if (verdictSectionMatch && verdictSectionMatch[1]) {
+              candidateBlocks.push(verdictSectionMatch[1]);
+            }
+            const jsonBlockRegex = /```json\s*([\s\S]*?)\s*```/gi;
+            let blockMatch;
+            while ((blockMatch = jsonBlockRegex.exec(bodyWithoutDetails)) !== null) {
+              candidateBlocks.push(blockMatch[1]);
+            }
+            for (const rawBlock of candidateBlocks) {
               try {
-                jsonVerdict = JSON.parse(jsonMatch[1]);
+                const parsed = JSON.parse(rawBlock);
+                if (parsed && typeof parsed === 'object' && typeof parsed.verdict === 'string') {
+                  jsonVerdict = parsed;
+                  break;
+                }
               } catch (e) {
                 // not valid JSON
               }
             }
+            const hasIterationHistory = /<summary>[\s\S]*?Review Iteration History/i.test(body);
 
             const isPassVerdict = Boolean(
               jsonVerdict &&
@@ -340,6 +361,7 @@ jobs:
             core.setOutput('missing_count', missingSections.length.toString());
             core.setOutput('missing_sections', missingSections.join(', '));
             core.setOutput('has_pass_verdict', isPassVerdict ? 'true' : 'false');
+            core.setOutput('has_iteration_history', hasIterationHistory ? 'true' : 'false');
             core.setOutput('review_depth', requiresArchitecturalDepth ? 'architectural' : 'standard');
             core.setOutput('escalation_triggers', escalationTriggers.join('; '));
             core.setOutput('arch_attestation_valid', archAttestationValid ? 'true' : 'false');
@@ -357,7 +379,8 @@ jobs:
             }
 
             if (isPassVerdict) {
-              summaryMd += `| **Tier 1 Review Verdict** | ✅ PASS | \`PASS\` verdict (0 blocking P0/P1 defects) |\n`;
+              const iterDetail = jsonVerdict.iteration ? ` (Iteration ${jsonVerdict.iteration}${hasIterationHistory ? ', prior history archived' : ''})` : '';
+              summaryMd += `| **Tier 1 Review Verdict** | ✅ PASS | \`PASS\` verdict${iterDetail} (0 blocking P0/P1 defects) |\n`;
             } else {
               summaryMd += `| **Tier 1 Review Verdict** | ⚠️ PENDING/FAIL | Missing valid \`PASS\` JSON verdict in PR description |\n`;
             }

@@ -54,6 +54,7 @@ The Two-Tier Model partitions code verification into a pre-coding gate and two d
 ┌────────────────────────────────────────────────────────┐
 │ Tier 2: Outer Loop (GitHub PR & CI Quality Gate)       │
 │ 1. PR opened with structured Evidence Pack             │
+│    (+ collapsed <details> Iteration 1 history if multi)│
 │ 2. GitHub Actions runs deterministic test matrix       │
 │ 3. Actions validates Tier 1 PASS verdict, escalation   │
 │    triggers, & required architectural_checks sign-off  │

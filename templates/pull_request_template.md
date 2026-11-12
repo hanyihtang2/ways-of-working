@@ -57,6 +57,8 @@
 }
 ```
 
+<!-- On multi-iteration reviews (Iteration 2 PASS after Iteration 1 CHANGES_REQUESTED), `prepare-pr` automatically renders a collapsed <details> Review Iteration History Markdown block here (with no additional ```json fenced blocks). -->
+
 ### Deterministic Build Verification
 
 - **Command:** `npm run build`
